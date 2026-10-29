@@ -2,12 +2,30 @@ package store
 
 import (
 	"encoding/json"
+	"os"
 	"testing"
 )
 
+// setupTestDB 打开测试库。设置了 WORB_MYSQL_HOST 时用 MySQL，否则用 SQLite。
+// setupTestDB opens the test database. It uses MySQL when WORB_MYSQL_HOST is set, otherwise SQLite.
 func setupTestDB(t *testing.T) *DB {
 	t.Helper()
 	dir := t.TempDir()
+	// Agent: 有 MySQL 环境变量时整套功能测试都打到 MySQL。
+	if host := os.Getenv("WORB_MYSQL_HOST"); host != "" {
+		db, err := NewMySQL(dir, MySQLConfig{
+			Host:     host,
+			Port:     envOr("WORB_MYSQL_PORT", "3306"),
+			User:     envOr("WORB_MYSQL_USER", "root"),
+			Password: os.Getenv("WORB_MYSQL_PASSWD"),
+			DBName:   envOr("WORB_MYSQL_DB", "worb"),
+		})
+		if err != nil {
+			t.Fatalf("NewMySQL: %v", err)
+		}
+		t.Cleanup(func() { db.Close() })
+		return db
+	}
 	db, err := New(dir, "sqlite")
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -214,6 +232,20 @@ func TestPurgeBatchSizeRespected(t *testing.T) {
 
 func TestPurgeNoDeletedData(t *testing.T) {
 	db := setupTestDB(t)
+
+	// Agent: MySQL 共用库可能残留前序用例的软删数据，先排空再断言空闲态。
+	for i := 0; i < 200; i++ {
+		more, err := db.purgeDeletedData(5000)
+		if err != nil {
+			t.Fatalf("purgeDeletedData drain: %v", err)
+		}
+		if !more {
+			break
+		}
+		if i == 199 {
+			t.Fatal("purge did not finish draining soft-deleted data")
+		}
+	}
 
 	// No deleted runs/projects — purge should be a no-op
 	more, err := db.purgeDeletedData(5000)

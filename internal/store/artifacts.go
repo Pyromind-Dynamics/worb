@@ -32,7 +32,7 @@ func (db *DB) CreateArtifact(runID, artifactType, name string, metadata json.Raw
 		a.Metadata = metadata
 	}
 
-	_, err := db.Exec("INSERT INTO artifacts (id, run_id, type, name, metadata) VALUES (?, ?, ?, ?, ?)",
+	_, err := db.Exec(db.SQL(SQLInsertArtifact),
 		a.ID, a.RunID, a.Type, a.Name, string(a.Metadata))
 	if err != nil {
 		return nil, fmt.Errorf("insert artifact: %w", err)
@@ -43,7 +43,7 @@ func (db *DB) CreateArtifact(runID, artifactType, name string, metadata json.Raw
 func (db *DB) GetArtifact(id string) (*Artifact, error) {
 	a := &Artifact{}
 	var metadata, digest sql.NullString
-	err := db.QueryRow("SELECT id, run_id, type, name, digest, state, metadata, created_at FROM artifacts WHERE id = ?", id).
+	err := db.QueryRow(db.SQL(SQLSelectArtifact), id).
 		Scan(&a.ID, &a.RunID, &a.Type, &a.Name, &digest, &a.State, &metadata, &a.CreatedAt)
 	if err != nil {
 		return nil, err
@@ -56,6 +56,6 @@ func (db *DB) GetArtifact(id string) (*Artifact, error) {
 }
 
 func (db *DB) CommitArtifact(id, digest string) error {
-	_, err := db.Exec("UPDATE artifacts SET state = 'committed', digest = ? WHERE id = ?", digest, id)
+	_, err := db.Exec(db.SQL(SQLCommitArtifact), digest, id)
 	return err
 }

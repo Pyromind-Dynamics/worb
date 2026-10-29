@@ -5,6 +5,7 @@ go 1.24.0
 require (
 	github.com/99designs/gqlgen v0.17.86
 	github.com/go-chi/chi/v5 v5.2.5
+	github.com/go-sql-driver/mysql v1.9.3
 	github.com/google/uuid v1.6.0
 	github.com/spf13/cobra v1.10.2
 	github.com/tursodatabase/libsql-client-go v0.0.0-20251219100830-236aa1ff8acc
@@ -13,6 +14,7 @@ require (
 )
 
 require (
+	filippo.io/edwards25519 v1.1.0 // indirect
 	github.com/agnivade/levenshtein v1.2.1 // indirect
 	github.com/antlr4-go/antlr/v4 v4.13.1 // indirect
 	github.com/coder/websocket v1.8.12 // indirect

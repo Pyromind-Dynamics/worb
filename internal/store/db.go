@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	// Agent: 匿名导入注册 MySQL 驱动，镜像/二进制开箱即可 --db-engine mysql，无需宿主机再装客户端。
+	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/tursodatabase/libsql-client-go/libsql"
 	_ "modernc.org/sqlite"
 )
@@ -37,6 +39,9 @@ func (ft *flexTime) Scan(value interface{}) error {
 			}
 		}
 		return fmt.Errorf("flexTime: cannot parse %q", v)
+	case []byte:
+		// Agent: MySQL 文本时间列返回 []byte，按字符串再解析一次。
+		return ft.Scan(string(v))
 	case nil:
 		ft.Time = time.Time{}
 		return nil
@@ -218,8 +223,18 @@ func (db *DB) castJSON(col string) string {
 	return col
 }
 
+// isMySQL 判断当前引擎是不是 MySQL。
+// isMySQL reports whether the current engine is MySQL.
+func (db *DB) isMySQL() bool {
+	// Agent: 空库对象按 SQLite 处理，避免改写原语句。
+	return db != nil && db.Engine == "mysql"
+}
+
+// isSQLite 判断当前引擎是否使用 SQLite 语法。MySQL 返回 false。
+// isSQLite reports whether the engine uses SQLite SQL. MySQL returns false.
 func (db *DB) isSQLite() bool {
-	return true
+	// Agent: 只有 MySQL 离开 SQLite 专用路径，turso 仍走 SQLite 语句。
+	return !db.isMySQL()
 }
 
 func New(dataDir, engine string) (*DB, error) {
@@ -256,21 +271,39 @@ func New(dataDir, engine string) (*DB, error) {
 		if err != nil {
 			return nil, fmt.Errorf("open turso: %w", err)
 		}
+	case "mysql":
+		// Agent: 只连接已存在的库。参数缺失或 Ping 失败时直接返回，不退回 SQLite。
+		var cfg MySQLConfig
+		cfg, err = LoadMySQLConfig(mysqlSecretDir)
+		if err != nil {
+			return nil, err
+		}
+		db, err = OpenMySQL(cfg)
+		if err != nil {
+			return nil, err
+		}
 	default:
 		return nil, fmt.Errorf("unsupported db engine: %s", engine)
 	}
 
+	// Agent: SQLite、turso、MySQL 共用这一次初始化和一个连接池。
+	return startStore(db, dataDir, engine)
+}
+
+// startStore 完成 schema 处理并启动 WAL 和后台清理。整个进程只调用一次。
+// startStore finishes schema setup and starts the WAL and background cleanup. It runs once per process.
+func startStore(raw *sql.DB, dataDir, engine string) (*DB, error) {
 	ctx, cancel := context.WithCancel(context.Background())
-	store := &DB{DB: db, Engine: engine, dataDir: dataDir, ctx: ctx, cancel: cancel, sqlPerf: newSQLPerfTracker(), storageCache: newStorageUsageCache()}
+	store := &DB{DB: raw, Engine: engine, dataDir: dataDir, ctx: ctx, cancel: cancel, sqlPerf: newSQLPerfTracker(), storageCache: newStorageUsageCache()}
 	if err := store.migrate(); err != nil {
-		db.Close()
+		raw.Close()
 		cancel()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
 
 	wal, err := newWAL(dataDir)
 	if err != nil {
-		db.Close()
+		raw.Close()
 		cancel()
 		return nil, fmt.Errorf("init wal: %w", err)
 	}
@@ -311,6 +344,7 @@ func (db *DB) SQLPerfSnapshot() SQLPerfSnapshot {
 }
 
 func (db *DB) Exec(query string, args ...any) (sql.Result, error) {
+	// Agent: 语句由调用方用编号从 sql_manager 取出，这里不再改写。
 	start := time.Now()
 	res, err := db.DB.Exec(query, args...)
 	db.recordSQLPerf(query, start)
@@ -318,6 +352,7 @@ func (db *DB) Exec(query string, args ...any) (sql.Result, error) {
 }
 
 func (db *DB) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	// Agent: 语句由调用方用编号从 sql_manager 取出，这里不再改写。
 	start := time.Now()
 	res, err := db.DB.ExecContext(ctx, query, args...)
 	db.recordSQLPerf(query, start)
@@ -325,6 +360,7 @@ func (db *DB) ExecContext(ctx context.Context, query string, args ...any) (sql.R
 }
 
 func (db *DB) Query(query string, args ...any) (*sql.Rows, error) {
+	// Agent: 语句由调用方用编号从 sql_manager 取出，这里不再改写。
 	start := time.Now()
 	rows, err := db.DB.Query(query, args...)
 	db.recordSQLPerf(query, start)
@@ -332,6 +368,7 @@ func (db *DB) Query(query string, args ...any) (*sql.Rows, error) {
 }
 
 func (db *DB) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	// Agent: 语句由调用方用编号从 sql_manager 取出，这里不再改写。
 	start := time.Now()
 	rows, err := db.DB.QueryContext(ctx, query, args...)
 	db.recordSQLPerf(query, start)
@@ -339,6 +376,7 @@ func (db *DB) QueryContext(ctx context.Context, query string, args ...any) (*sql
 }
 
 func (db *DB) QueryRow(query string, args ...any) *sql.Row {
+	// Agent: 语句由调用方用编号从 sql_manager 取出，这里不再改写。
 	start := time.Now()
 	row := db.DB.QueryRow(query, args...)
 	db.recordSQLPerf(query, start)
@@ -346,6 +384,7 @@ func (db *DB) QueryRow(query string, args ...any) *sql.Row {
 }
 
 func (db *DB) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
+	// Agent: 语句由调用方用编号从 sql_manager 取出，这里不再改写。
 	start := time.Now()
 	row := db.DB.QueryRowContext(ctx, query, args...)
 	db.recordSQLPerf(query, start)
@@ -364,7 +403,10 @@ func (db *DB) ExecuteQuery(query string) (*QueryResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	rows, err := db.QueryContext(ctx, query)
+	// Agent: 页面提交的 SQL 原样执行，不改写成另一种引擎的语句。
+	start := time.Now()
+	rows, err := db.DB.QueryContext(ctx, query)
+	db.recordSQLPerf(query, start)
 	if err != nil {
 		return nil, err
 	}
@@ -409,122 +451,11 @@ func (db *DB) ExecuteQuery(query string) (*QueryResult, error) {
 	return result, rows.Err()
 }
 
+// migrate SQLite 建表；MySQL 只检查已有表结构。
+// migrate creates tables on SQLite; on MySQL it only checks the existing schema.
 func (db *DB) migrate() error {
-	return db.migrateSQLite()
-}
-
-func (db *DB) migrateSQLite() error {
-	migrations := []string{
-		`CREATE TABLE IF NOT EXISTS projects (
-			id TEXT PRIMARY KEY,
-			entity TEXT NOT NULL DEFAULT 'local',
-			name TEXT NOT NULL,
-			created_at TEXT DEFAULT (datetime('now')),
-			UNIQUE(entity, name)
-		)`,
-		`CREATE TABLE IF NOT EXISTS runs (
-			id TEXT PRIMARY KEY,
-			project_id TEXT NOT NULL REFERENCES projects(id),
-			name TEXT NOT NULL,
-			display_name TEXT,
-			config TEXT,
-			summary TEXT,
-			state TEXT DEFAULT 'running',
-			host TEXT,
-			program TEXT,
-			git_commit TEXT,
-			tags TEXT DEFAULT '[]',
-			notes TEXT,
-			group_name TEXT,
-			job_type TEXT,
-			sweep_name TEXT,
-			history_line_count INTEGER DEFAULT 0,
-			events_line_count INTEGER DEFAULT 0,
-			log_line_count INTEGER DEFAULT 0,
-			created_at TEXT DEFAULT (datetime('now')),
-			updated_at TEXT DEFAULT (datetime('now')),
-			heartbeat_at TEXT DEFAULT (datetime('now'))
-		)`,
-		`CREATE TABLE IF NOT EXISTS history_scalars (
-			run_id TEXT NOT NULL REFERENCES runs(id),
-			step INTEGER NOT NULL,
-			key TEXT NOT NULL,
-			value REAL NOT NULL,
-			x_step REAL,
-			PRIMARY KEY (run_id, key, step)
-		) WITHOUT ROWID`,
-		`CREATE TABLE IF NOT EXISTS history_histograms (
-			run_id TEXT NOT NULL REFERENCES runs(id),
-			step INTEGER NOT NULL,
-			key TEXT NOT NULL,
-			x_step REAL,
-			bins TEXT NOT NULL,
-			vals TEXT NOT NULL,
-			PRIMARY KEY (run_id, key, step)
-		) WITHOUT ROWID`,
-		`CREATE TABLE IF NOT EXISTS run_steps (
-			run_id TEXT NOT NULL REFERENCES runs(id),
-			step INTEGER NOT NULL,
-			PRIMARY KEY (run_id, step)
-		) WITHOUT ROWID`,
-		`CREATE TABLE IF NOT EXISTS system_events (
-			run_id TEXT NOT NULL REFERENCES runs(id),
-			line_num INTEGER NOT NULL,
-			data TEXT NOT NULL,
-			timestamp TEXT DEFAULT (datetime('now'))
-		)`,
-		`CREATE TABLE IF NOT EXISTS console_logs (
-			run_id TEXT NOT NULL REFERENCES runs(id),
-			line_num INTEGER NOT NULL,
-			line TEXT NOT NULL,
-			stream TEXT DEFAULT 'stdout',
-			timestamp TEXT DEFAULT (datetime('now'))
-		)`,
-		`CREATE TABLE IF NOT EXISTS artifacts (
-			id TEXT PRIMARY KEY,
-			run_id TEXT NOT NULL REFERENCES runs(id),
-			type TEXT NOT NULL,
-			name TEXT NOT NULL,
-			digest TEXT,
-			state TEXT DEFAULT 'pending',
-			metadata TEXT,
-			created_at TEXT DEFAULT (datetime('now'))
-		)`,
-		`CREATE TABLE IF NOT EXISTS files (
-			id TEXT PRIMARY KEY,
-			run_id TEXT NOT NULL REFERENCES runs(id),
-			name TEXT NOT NULL,
-			url TEXT,
-			size INTEGER DEFAULT 0,
-			created_at TEXT DEFAULT (datetime('now'))
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_system_events_run_id ON system_events(run_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_console_logs_run_id ON console_logs(run_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_runs_project_id ON runs(project_id)`,
-	}
-
-	for _, m := range migrations {
-		if _, err := db.Exec(m); err != nil {
-			return fmt.Errorf("migration failed: %w\nSQL: %s", err, m)
-		}
-	}
-
-	db.Exec("ALTER TABLE runs ADD COLUMN deleted_at TEXT")
-	db.Exec("ALTER TABLE projects ADD COLUMN deleted_at TEXT")
-	db.Exec("ALTER TABLE runs ADD COLUMN received_history_count INTEGER DEFAULT 0")
-	db.Exec("ALTER TABLE runs ADD COLUMN fork_run_id TEXT")
-	db.Exec("ALTER TABLE runs ADD COLUMN fork_step INTEGER")
-
-	db.Exec(`CREATE TABLE IF NOT EXISTS run_keys (
-		run_id TEXT NOT NULL REFERENCES runs(id),
-		key TEXT NOT NULL,
-		PRIMARY KEY (run_id, key)
-	) WITHOUT ROWID`)
-
-	db.Exec(`CREATE INDEX IF NOT EXISTS idx_history_scalars_run_step ON history_scalars(run_id, step)`)
-	db.Exec(`CREATE INDEX IF NOT EXISTS idx_run_steps_run_step ON run_steps(run_id, step)`)
-
-	return nil
+	// Agent: MySQL 不执行 CREATE / ALTER，表由部署侧提前建好。
+	return db.migrateEngine()
 }
 
 // activeRunIDs returns the subset of ids that exist and are not deleted.
@@ -532,13 +463,12 @@ func (db *DB) activeRunIDs(ids []string) map[string]bool {
 	if len(ids) == 0 {
 		return nil
 	}
-	placeholders := strings.Repeat("?,", len(ids))
-	placeholders = placeholders[:len(placeholders)-1]
+	// Agent: IN 列表长度随 run 数量变化，由 sql_manager 按编号拼装。
 	args := make([]interface{}, len(ids))
 	for i, id := range ids {
 		args[i] = id
 	}
-	rows, err := db.Query("SELECT id FROM runs WHERE id IN ("+placeholders+") AND deleted_at IS NULL", args...)
+	rows, err := db.Query(db.SQLActiveRunIDs(len(ids)), args...)
 	if err != nil {
 		// On error, assume all are active to avoid dropping data
 		active := make(map[string]bool, len(ids))

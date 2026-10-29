@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/sarna/worb/internal/auth"
 	"github.com/sarna/worb/internal/store"
 )
 
@@ -27,8 +28,11 @@ type fileStreamFile struct {
 	Content []string `json:"content"`
 }
 
+// ServeHTTP 接收 wandb 指标流，并把数据记到当前 wandb key 名下。
+// ServeHTTP accepts a wandb file stream and stores it under the current wandb key.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	entity := chi.URLParam(r, "entity")
+	// Agent: 不使用 URL 中的 entity，归属以 Authorization 里的 key 为准。
+	entity := auth.EntityFromContext(r.Context())
 	project := chi.URLParam(r, "project")
 	runName := chi.URLParam(r, "run")
 

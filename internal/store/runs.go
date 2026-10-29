@@ -52,7 +52,7 @@ func (db *DB) EnsureProject(entity, name string) (*Project, error) {
 
 	var p Project
 	var createdAt flexTime
-	err := db.QueryRow("SELECT id, entity, name, created_at FROM projects WHERE entity = ? AND name = ? AND deleted_at IS NULL", entity, name).
+	err := db.QueryRow(db.SQL(SQLSelectProjectByEntityName), entity, name).
 		Scan(&p.ID, &p.Entity, &p.Name, &createdAt)
 	p.CreatedAt = createdAt.Time
 	if err == nil {
@@ -67,7 +67,7 @@ func (db *DB) EnsureProject(entity, name string) (*Project, error) {
 		Entity: entity,
 		Name:   name,
 	}
-	_, err = db.Exec("INSERT INTO projects (id, entity, name) VALUES (?, ?, ?)", p.ID, p.Entity, p.Name)
+	_, err = db.Exec(db.SQL(SQLInsertProject), p.ID, p.Entity, p.Name)
 	if err != nil {
 		return nil, fmt.Errorf("insert project: %w", err)
 	}
@@ -107,11 +107,11 @@ func (db *DB) UpsertRun(p UpsertRunParams) (*Run, error) {
 	}
 
 	var existing string
-	err := db.QueryRow("SELECT id FROM runs WHERE id = ? AND deleted_at IS NULL", p.ID).Scan(&existing)
+	err := db.QueryRow(db.SQL(SQLSelectRunIDExists), p.ID).Scan(&existing)
 	if err == sql.ErrNoRows && !clientSentID && p.Name != "" {
 		proj, projErr := db.EnsureProject(p.Entity, p.Project)
 		if projErr == nil {
-			lookupErr := db.QueryRow("SELECT id FROM runs WHERE project_id = ? AND name = ? AND deleted_at IS NULL", proj.ID, p.Name).Scan(&existing)
+			lookupErr := db.QueryRow(db.SQL(SQLSelectRunIDByName), proj.ID, p.Name).Scan(&existing)
 			if lookupErr == nil {
 				p.ID = existing
 				err = nil
@@ -135,50 +135,70 @@ func (db *DB) UpsertRun(p UpsertRunParams) (*Run, error) {
 		if p.State == "" {
 			p.State = "running"
 		}
-		_, err = db.Exec(`INSERT INTO runs (id, project_id, name, display_name, config, summary, state, host, program, git_commit, tags, notes, group_name, job_type, sweep_name)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		_, err = db.Exec(db.SQL(SQLInsertRun),
 			p.ID, proj.ID, p.Name, p.DisplayName, string(p.Config), string(p.Summary), p.State,
 			p.Host, p.Program, p.GitCommit, string(p.Tags), p.Notes, p.GroupName, p.JobType, p.SweepName)
 		if err != nil {
 			return nil, fmt.Errorf("insert run: %w", err)
 		}
 	} else if err == nil {
-		sets := "updated_at = current_timestamp, heartbeat_at = current_timestamp"
+		// Agent: SET 子句按本次有值的字段拼装，列名来自白名单。
+		extra := []string{}
+		if p.State != "" {
+			extra = append(extra, "state = ?")
+		}
+		if p.Config != nil {
+			extra = append(extra, "config = ?")
+		}
+		if p.Summary != nil {
+			extra = append(extra, "summary = ?")
+		}
+		if p.DisplayName != "" {
+			extra = append(extra, "display_name = ?")
+		}
+		if p.Tags != nil {
+			extra = append(extra, "tags = ?")
+		}
+		if p.Notes != "" {
+			extra = append(extra, "notes = ?")
+		}
+		if p.Host != "" {
+			extra = append(extra, "host = ?")
+		}
+		if p.Program != "" {
+			extra = append(extra, "program = ?")
+		}
+		query, qErr := db.SQLUpdateRun(extra)
+		if qErr != nil {
+			return nil, qErr
+		}
 		args := []any{}
 		if p.State != "" {
-			sets += ", state = ?"
 			args = append(args, p.State)
 		}
 		if p.Config != nil {
-			sets += ", config = ?"
 			args = append(args, string(p.Config))
 		}
 		if p.Summary != nil {
-			sets += ", summary = ?"
 			args = append(args, string(p.Summary))
 		}
 		if p.DisplayName != "" {
-			sets += ", display_name = ?"
 			args = append(args, p.DisplayName)
 		}
 		if p.Tags != nil {
-			sets += ", tags = ?"
 			args = append(args, string(p.Tags))
 		}
 		if p.Notes != "" {
-			sets += ", notes = ?"
 			args = append(args, p.Notes)
 		}
 		if p.Host != "" {
-			sets += ", host = ?"
 			args = append(args, p.Host)
 		}
 		if p.Program != "" {
-			sets += ", program = ?"
 			args = append(args, p.Program)
 		}
 		args = append(args, p.ID)
-		_, err = db.Exec("UPDATE runs SET "+sets+" WHERE id = ?", args...)
+		_, err = db.DB.Exec(query, args...)
 		if err != nil {
 			return nil, fmt.Errorf("update run: %w", err)
 		}
@@ -190,12 +210,12 @@ func (db *DB) UpsertRun(p UpsertRunParams) (*Run, error) {
 }
 
 func (db *DB) FinishRun(id string) error {
-	_, err := db.Exec("UPDATE runs SET state = 'finished', updated_at = current_timestamp WHERE id = ?", id)
+	_, err := db.Exec(db.SQL(SQLFinishRun), id)
 	return err
 }
 
 func (db *DB) IncrReceivedHistoryCount(id string, delta int) {
-	_, err := db.Exec("UPDATE runs SET received_history_count = received_history_count + ? WHERE id = ?", delta, id)
+	_, err := db.Exec(db.SQL(SQLIncrReceivedHistory), delta, id)
 	if err != nil {
 		log.Printf("[store] IncrReceivedHistoryCount(%s, %d): %v", id, delta, err)
 	}
@@ -208,13 +228,7 @@ func (db *DB) GetRun(id string) (*Run, error) {
 	var forkRunID sql.NullString
 	var forkStep sql.NullInt64
 	var createdAt, updatedAt, heartbeatAt flexTime
-	err := db.QueryRow(fmt.Sprintf(`SELECT r.id, r.project_id, r.name, r.display_name,
-		%s, %s, r.state,
-		r.host, r.program, r.git_commit, %s, r.notes, r.group_name, r.job_type, r.sweep_name,
-		r.history_line_count, r.events_line_count, r.log_line_count, COALESCE(r.received_history_count, 0),
-		r.fork_run_id, r.fork_step,
-		r.created_at, r.updated_at, r.heartbeat_at
-		FROM runs r WHERE r.id = ? AND r.deleted_at IS NULL`, db.castJSON("r.config"), db.castJSON("r.summary"), db.castJSON("r.tags")), id).
+	err := db.QueryRow(db.SQLRunSelect("byID"), id).
 		Scan(&r.ID, &r.ProjectID, &r.Name, &displayName, &config, &summary, &r.State,
 			&host, &program, &gitCommit, &tags, &notes, &groupName, &jobType, &sweepName,
 			&r.HistoryLineCount, &r.EventsLineCount, &r.LogLineCount, &r.ReceivedHistoryCount,
@@ -255,10 +269,10 @@ func (db *DB) GetRun(id string) (*Run, error) {
 
 func (db *DB) GetRunByName(projectID, name string) (*Run, error) {
 	var id string
-	err := db.QueryRow("SELECT id FROM runs WHERE project_id = ? AND name = ? AND deleted_at IS NULL", projectID, name).Scan(&id)
+	err := db.QueryRow(db.SQL(SQLSelectRunIDByName), projectID, name).Scan(&id)
 	if err == sql.ErrNoRows {
 		// Fallback: try matching by display_name
-		err = db.QueryRow("SELECT id FROM runs WHERE project_id = ? AND display_name = ? AND deleted_at IS NULL", projectID, name).Scan(&id)
+		err = db.QueryRow(db.SQL(SQLSelectRunIDByDisplay), projectID, name).Scan(&id)
 	}
 	if err != nil {
 		return nil, err
@@ -279,7 +293,7 @@ func (db *DB) ResolveRunRef(projectID, ref string) (*Run, error) {
 	}
 
 	var nameCount int
-	err = db.QueryRow("SELECT COUNT(*) FROM runs WHERE project_id = ? AND name = ? AND deleted_at IS NULL", projectID, ref).Scan(&nameCount)
+	err = db.QueryRow(db.SQL(SQLCountRunsByName), projectID, ref).Scan(&nameCount)
 	if err != nil {
 		return nil, err
 	}
@@ -291,13 +305,13 @@ func (db *DB) ResolveRunRef(projectID, ref string) (*Run, error) {
 	}
 
 	var displayNameCount int
-	err = db.QueryRow("SELECT COUNT(*) FROM runs WHERE project_id = ? AND display_name = ? AND deleted_at IS NULL", projectID, ref).Scan(&displayNameCount)
+	err = db.QueryRow(db.SQL(SQLCountRunsByDisplay), projectID, ref).Scan(&displayNameCount)
 	if err != nil {
 		return nil, err
 	}
 	if displayNameCount == 1 {
 		var id string
-		err = db.QueryRow("SELECT id FROM runs WHERE project_id = ? AND display_name = ? AND deleted_at IS NULL", projectID, ref).Scan(&id)
+		err = db.QueryRow(db.SQL(SQLSelectRunIDByDisplay), projectID, ref).Scan(&id)
 		if err != nil {
 			return nil, err
 		}
@@ -311,14 +325,7 @@ func (db *DB) ResolveRunRef(projectID, ref string) (*Run, error) {
 }
 
 func (db *DB) ListRuns(projectID string) ([]*Run, error) {
-	rows, err := db.Query(fmt.Sprintf(`SELECT r.id, r.project_id, r.name, r.display_name,
-		%s, %s, r.state,
-		r.host, r.program, r.git_commit, %s, r.notes, r.group_name, r.job_type, r.sweep_name,
-		r.history_line_count, r.events_line_count, r.log_line_count, COALESCE(r.received_history_count, 0),
-		r.fork_run_id, r.fork_step,
-		r.created_at, r.updated_at, r.heartbeat_at
-		FROM runs r WHERE r.project_id = ? AND r.deleted_at IS NULL ORDER BY r.created_at DESC`,
-		db.castJSON("r.config"), db.castJSON("r.summary"), db.castJSON("r.tags")), projectID)
+	rows, err := db.Query(db.SQLRunSelect("byProject"), projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -372,9 +379,7 @@ func (db *DB) ListRuns(projectID string) ([]*Run, error) {
 }
 
 func (db *DB) ListRunsLite(projectID string) ([]*Run, error) {
-	rows, err := db.Query(`SELECT r.id, r.project_id, r.name, r.display_name, r.state,
-		r.history_line_count, r.created_at, r.updated_at, r.heartbeat_at
-		FROM runs r WHERE r.project_id = ? AND r.deleted_at IS NULL ORDER BY r.created_at DESC`, projectID)
+	rows, err := db.Query(db.SQL(SQLListRunsLite), projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -399,7 +404,7 @@ func (db *DB) ListRunsLite(projectID string) ([]*Run, error) {
 }
 
 func (db *DB) DeleteRun(runID string) error {
-	res, err := db.Exec("UPDATE runs SET deleted_at = current_timestamp WHERE id = ? AND deleted_at IS NULL", runID)
+	res, err := db.Exec(db.SQL(SQLSoftDeleteRun), runID)
 	if err != nil {
 		return err
 	}
@@ -417,10 +422,10 @@ func (db *DB) DeleteProject(projectID string) error {
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.Exec("UPDATE runs SET deleted_at = current_timestamp WHERE project_id = ? AND deleted_at IS NULL", projectID); err != nil {
+	if _, err := tx.Exec(db.SQL(SQLSoftDeleteRunsByProject), projectID); err != nil {
 		return fmt.Errorf("soft-delete runs: %w", err)
 	}
-	res, err := tx.Exec("UPDATE projects SET deleted_at = current_timestamp WHERE id = ? AND deleted_at IS NULL", projectID)
+	res, err := tx.Exec(db.SQL(SQLSoftDeleteProject), projectID)
 	if err != nil {
 		return fmt.Errorf("soft-delete project: %w", err)
 	}
@@ -432,14 +437,7 @@ func (db *DB) DeleteProject(projectID string) error {
 }
 
 func (db *DB) ListRunsFiltered(projectID string, displayName string) ([]*Run, error) {
-	query := fmt.Sprintf(`SELECT r.id, r.project_id, r.name, r.display_name,
-		%s, %s, r.state,
-		r.host, r.program, r.git_commit, %s, r.notes, r.group_name, r.job_type, r.sweep_name,
-		r.history_line_count, r.events_line_count, r.log_line_count, COALESCE(r.received_history_count, 0),
-		r.fork_run_id, r.fork_step,
-		r.created_at, r.updated_at, r.heartbeat_at
-		FROM runs r WHERE r.project_id = ? AND r.deleted_at IS NULL`,
-		db.castJSON("r.config"), db.castJSON("r.summary"), db.castJSON("r.tags"))
+	query := db.SQLRunSelect("filtered")
 	args := []any{projectID}
 	if displayName != "" {
 		query += ` AND r.display_name = ?`
@@ -549,10 +547,7 @@ func (db *DB) ForkRun(p ForkRunParams) (*Run, error) {
 
 	if p.NewRunID != "" {
 		// Run already exists (created by UpsertRun) — update it with fork metadata
-		_, err = db.Exec(`UPDATE runs SET config = ?, tags = ?, notes = ?, host = ?, program = ?,
-			git_commit = ?, group_name = ?, job_type = ?, sweep_name = ?,
-			fork_run_id = ?, fork_step = ?, updated_at = current_timestamp
-			WHERE id = ?`,
+		_, err = db.Exec(db.SQL(SQLUpdateForkedRun),
 			configStr, tagsStr, parent.Notes, parent.Host, parent.Program,
 			parent.GitCommit, parent.GroupName, parent.JobType, parent.SweepName,
 			p.ParentRunID, p.ForkStep, newID)
@@ -561,9 +556,7 @@ func (db *DB) ForkRun(p ForkRunParams) (*Run, error) {
 		}
 	} else {
 		// Create a brand new run record
-		_, err = db.Exec(`INSERT INTO runs (id, project_id, name, display_name, config, summary, state,
-			host, program, git_commit, tags, notes, group_name, job_type, sweep_name, fork_run_id, fork_step)
-			VALUES (?, ?, ?, ?, ?, '{}', 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		_, err = db.Exec(db.SQL(SQLInsertForkedRun),
 			newID, parent.ProjectID, name, displayName, configStr,
 			parent.Host, parent.Program, parent.GitCommit, tagsStr, parent.Notes,
 			parent.GroupName, parent.JobType, parent.SweepName, p.ParentRunID, p.ForkStep)
@@ -572,7 +565,7 @@ func (db *DB) ForkRun(p ForkRunParams) (*Run, error) {
 		}
 	}
 
-	_, err = db.Exec("UPDATE runs SET history_line_count = ? WHERE id = ?", p.ForkStep+1, newID)
+	_, err = db.Exec(db.SQL(SQLSetHistoryLineCount), p.ForkStep+1, newID)
 	if err != nil {
 		return nil, fmt.Errorf("set history_line_count: %w", err)
 	}
@@ -620,9 +613,9 @@ func (db *DB) ListProjects(entity string) ([]*Project, error) {
 	var rows *sql.Rows
 	var err error
 	if entity == "" {
-		rows, err = db.Query("SELECT id, entity, name, created_at FROM projects WHERE deleted_at IS NULL ORDER BY created_at DESC")
+		rows, err = db.Query(db.SQL(SQLListAllProjects))
 	} else {
-		rows, err = db.Query("SELECT id, entity, name, created_at FROM projects WHERE entity = ? AND deleted_at IS NULL ORDER BY created_at DESC", entity)
+		rows, err = db.Query(db.SQL(SQLListProjectsByEntity), entity)
 	}
 	if err != nil {
 		return nil, err
@@ -645,7 +638,7 @@ func (db *DB) ListProjects(entity string) ([]*Project, error) {
 func (db *DB) GetProject(id string) (*Project, error) {
 	p := &Project{}
 	var ca flexTime
-	err := db.QueryRow("SELECT id, entity, name, created_at FROM projects WHERE id = ? AND deleted_at IS NULL", id).
+	err := db.QueryRow(db.SQL(SQLSelectProjectByID), id).
 		Scan(&p.ID, &p.Entity, &p.Name, &ca)
 	if err != nil {
 		return nil, err
@@ -664,16 +657,16 @@ type File struct {
 }
 
 func (db *DB) InsertFile(id, runID, name, url string) error {
-	_, err := db.Exec("INSERT OR IGNORE INTO files (id, run_id, name, url) VALUES (?, ?, ?, ?)", id, runID, name, url)
+	_, err := db.Exec(db.SQL(SQLInsertFileIgnore), id, runID, name, url)
 	return err
 }
 
 func (db *DB) UpdateFileSize(fileID string, size int64) {
-	db.Exec("UPDATE files SET size = ? WHERE id = ?", size, fileID)
+	db.Exec(db.SQL(SQLUpdateFileSize), size, fileID)
 }
 
 func (db *DB) ListFiles(runID string) ([]*File, error) {
-	rows, err := db.Query("SELECT id, run_id, name, COALESCE(url, ''), COALESCE(size, 0), created_at FROM files WHERE run_id = ? ORDER BY name", runID)
+	rows, err := db.Query(db.SQL(SQLListFilesByRun), runID)
 	if err != nil {
 		return nil, err
 	}
@@ -695,7 +688,7 @@ func (db *DB) ListFiles(runID string) ([]*File, error) {
 func (db *DB) GetProjectByName(entity, name string) (*Project, error) {
 	p := &Project{}
 	var ca flexTime
-	err := db.QueryRow("SELECT id, entity, name, created_at FROM projects WHERE entity = ? AND name = ? AND deleted_at IS NULL", entity, name).
+	err := db.QueryRow(db.SQL(SQLSelectProjectByEntityName), entity, name).
 		Scan(&p.ID, &p.Entity, &p.Name, &ca)
 	if err != nil {
 		return nil, err

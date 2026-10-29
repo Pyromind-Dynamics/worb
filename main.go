@@ -38,7 +38,8 @@ func main() {
 	cmd.Flags().StringVar(&host, "host", "127.0.0.1", "host to bind to (use 0.0.0.0 for all interfaces)")
 	cmd.Flags().IntVar(&port, "port", 8080, "port to listen on")
 	cmd.Flags().StringVar(&dataDir, "data", defaultDataDir, "data directory")
-	cmd.Flags().StringVar(&dbEngine, "db-engine", "sqlite", "database engine (sqlite or duckdb)")
+	// Agent: 增加 mysql。生产用 --db-engine mysql，本地和测试继续用 sqlite。
+	cmd.Flags().StringVar(&dbEngine, "db-engine", "sqlite", "database engine (sqlite, mysql, or turso)")
 
 	if err := cmd.Execute(); err != nil {
 		log.Fatal(err)

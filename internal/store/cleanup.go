@@ -26,11 +26,11 @@ func (db *DB) StartCleanup() {
 
 func (db *DB) hasDeletedData() bool {
 	var id string
-	err := db.QueryRow("SELECT id FROM runs WHERE deleted_at IS NOT NULL LIMIT 1").Scan(&id)
+	err := db.QueryRow(db.SQL(SQLSelectDeletedRun)).Scan(&id)
 	if err == nil {
 		return true
 	}
-	err = db.QueryRow("SELECT id FROM projects WHERE deleted_at IS NOT NULL LIMIT 1").Scan(&id)
+	err = db.QueryRow(db.SQL(SQLSelectDeletedProject)).Scan(&id)
 	return err == nil
 }
 
@@ -39,7 +39,7 @@ func (db *DB) hasDeletedData() bool {
 func (db *DB) purgeDeletedData(batchSize int) (bool, error) {
 	// Find one soft-deleted run
 	var runID string
-	err := db.QueryRow("SELECT id FROM runs WHERE deleted_at IS NOT NULL LIMIT 1").Scan(&runID)
+	err := db.QueryRow(db.SQL(SQLSelectDeletedRun)).Scan(&runID)
 	if err == sql.ErrNoRows {
 		// No deleted runs — check for orphaned projects
 		return db.purgeDeletedProjects()
@@ -60,24 +60,18 @@ func (db *DB) purgeDeletedData(batchSize int) (bool, error) {
 		}
 	}
 
-	if _, err := db.Exec("DELETE FROM runs WHERE id = ?", runID); err != nil {
+	if _, err := db.Exec(db.SQL(SQLDeleteRunHard), runID); err != nil {
 		return false, err
 	}
 	return true, nil // check for more deleted runs
 }
 
 func (db *DB) deleteBatch(table, column, id string, batchSize int) (int64, error) {
-	var query string
-	switch table {
-	case "history_scalars", "history_histograms":
-		// WITHOUT ROWID tables — use primary key subquery
-		query = "DELETE FROM " + table + " WHERE (" + column + ", key, step) IN (SELECT " + column + ", key, step FROM " + table + " WHERE " + column + " = ? LIMIT ?)"
-	case "run_steps":
-		query = "DELETE FROM " + table + " WHERE (" + column + ", step) IN (SELECT " + column + ", step FROM " + table + " WHERE " + column + " = ? LIMIT ?)"
-	case "run_keys":
-		query = "DELETE FROM " + table + " WHERE (" + column + ", key) IN (SELECT " + column + ", key FROM " + table + " WHERE " + column + " = ? LIMIT ?)"
-	default:
-		query = "DELETE FROM " + table + " WHERE rowid IN (SELECT rowid FROM " + table + " WHERE " + column + " = ? LIMIT ?)"
+	// Agent: MySQL 使用 DELETE ... LIMIT，SQLite 仍按主键分批删除。
+	// Agent: 分批删除语句按编号从 sql_manager 取。
+	query, err := db.SQLDeleteBatch(table, column)
+	if err != nil {
+		return 0, err
 	}
 	res, err := db.Exec(query, id, batchSize)
 	if err != nil {
@@ -89,19 +83,14 @@ func (db *DB) deleteBatch(table, column, id string, batchSize int) (int64, error
 // purgeDeletedProjects hard-deletes projects that are soft-deleted and have no remaining runs.
 func (db *DB) purgeDeletedProjects() (bool, error) {
 	var projectID string
-	err := db.QueryRow(`
-		SELECT p.id FROM projects p
-		WHERE p.deleted_at IS NOT NULL
-		AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.project_id = p.id)
-		LIMIT 1
-	`).Scan(&projectID)
+	err := db.QueryRow(db.SQL(SQLSelectOrphanProject)).Scan(&projectID)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
-	if _, err := db.Exec("DELETE FROM projects WHERE id = ?", projectID); err != nil {
+	if _, err := db.Exec(db.SQL(SQLDeleteProjectHard), projectID); err != nil {
 		return false, err
 	}
 	return true, nil

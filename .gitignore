@@ -5,3 +5,8 @@ wandb/
 *.duckdb.wal
 __pycache__/
 .env
+
+
+pyromind.md
+worb修改记录.md
+worb接入方案.md

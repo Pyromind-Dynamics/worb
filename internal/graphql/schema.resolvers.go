@@ -16,20 +16,17 @@ import (
 	"github.com/sarna/worb/internal/store"
 )
 
-// UpsertBucket is the resolver for the upsertBucket field.
+// UpsertBucket 创建或更新 run，项目归属使用本次请求的 wandb key。
+// UpsertBucket creates or updates a run and assigns it to the request wandb key.
 func (r *mutationResolver) UpsertBucket(ctx context.Context, input *UpsertBucketInput, id *string, name *string, entity *string, project *string, config *string, summary *string, state *string, host *string, program *string, commit *string, tags []string, displayName *string, notes *string, groupName *string, jobType *string, sweepName *string, description *string) (*UpsertBucketPayload, error) {
+	// Agent: 调用方传入的 entity 不参与归属。
+	_ = entity
 	if input != nil {
 		if input.ID != nil && id == nil {
 			id = input.ID
 		}
 		if input.Name != nil && name == nil {
 			name = input.Name
-		}
-		if input.Entity != nil && entity == nil {
-			entity = input.Entity
-		}
-		if input.EntityName != nil && entity == nil {
-			entity = input.EntityName
 		}
 		if input.Project != nil && project == nil {
 			project = input.Project
@@ -89,11 +86,8 @@ func (r *mutationResolver) UpsertBucket(ctx context.Context, input *UpsertBucket
 	if name != nil {
 		params.Name = *name
 	}
-	if entity != nil {
-		params.Entity = *entity
-	} else {
-		params.Entity = "local"
-	}
+	// Agent: entity 固定为 Authorization 中的 wandb key 原文。
+	params.Entity = auth.EntityFromContext(ctx)
 	if project != nil {
 		params.Project = *project
 	} else {
@@ -218,13 +212,15 @@ func (r *mutationResolver) UpsertBucket(ctx context.Context, input *UpsertBucket
 	}, nil
 }
 
-// CreateArtifact is the resolver for the createArtifact field.
+// CreateArtifact 在当前 wandb key 下登记 artifact。
+// CreateArtifact records an artifact under the current wandb key.
 func (r *mutationResolver) CreateArtifact(ctx context.Context, input CreateArtifactInput) (*CreateArtifactPayload, error) {
 	projectName := "default"
 	if input.ProjectName != nil {
 		projectName = *input.ProjectName
 	}
-	proj, err := r.Store.EnsureProject(input.EntityName, projectName)
+	// Agent: 忽略 input.EntityName，归属取本次请求的 key。
+	proj, err := r.Store.EnsureProject(auth.EntityFromContext(ctx), projectName)
 	if err != nil {
 		return nil, err
 	}
@@ -310,13 +306,15 @@ func (r *mutationResolver) CreateArtifactFiles(ctx context.Context, input Create
 	}, nil
 }
 
-// CreateRunFiles is the resolver for the createRunFiles field.
+// CreateRunFiles 为当前 wandb key 下的 run 登记待上传文件。
+// CreateRunFiles registers upload files for a run owned by the current wandb key.
 func (r *mutationResolver) CreateRunFiles(ctx context.Context, input CreateRunFilesInput) (*CreateRunFilesPayload, error) {
 	projectName := "default"
 	if input.ProjectName != nil {
 		projectName = *input.ProjectName
 	}
-	proj, err := r.Store.EnsureProject(input.EntityName, projectName)
+	// Agent: 忽略 input.EntityName，归属取本次请求的 key。
+	proj, err := r.Store.EnsureProject(auth.EntityFromContext(ctx), projectName)
 	if err != nil {
 		return nil, err
 	}
@@ -422,8 +420,10 @@ func (r *projectResolver) Bucket(ctx context.Context, obj *Project, name string,
 	return storeRunToGQL(run), nil
 }
 
-// Viewer is the resolver for the viewer field.
+// Viewer 返回当前 wandb key，供客户端作为默认 entity。
+// Viewer returns the current wandb key so the client can use it as the default entity.
 func (r *queryResolver) Viewer(ctx context.Context) (*User, error) {
+	// Agent: entity 即 Middleware 保存的 key 原文。
 	entity := auth.EntityFromContext(ctx)
 	flags := "{}"
 	return &User{
@@ -438,16 +438,17 @@ func (r *queryResolver) Viewer(ctx context.Context) (*User, error) {
 	}, nil
 }
 
-// Project is the resolver for the project field.
+// Project 按当前 wandb key 查找或创建项目。
+// Project finds or creates a project under the current wandb key.
 func (r *queryResolver) Project(ctx context.Context, name *string, entityName *string) (*Project, error) {
+	// Agent: 忽略客户端传入的 entityName。
+	_ = entityName
 	projectName := "default"
 	if name != nil {
 		projectName = *name
 	}
-	entity := "local"
-	if entityName != nil {
-		entity = *entityName
-	}
+	// Agent: 按本次请求的 wandb key 归属项目。
+	entity := auth.EntityFromContext(ctx)
 
 	proj, err := r.Store.EnsureProject(entity, projectName)
 	if err != nil {
@@ -465,16 +466,17 @@ func (r *queryResolver) Project(ctx context.Context, name *string, entityName *s
 	}, nil
 }
 
-// Model is the resolver for the model field.
+// Model 与 Project 相同，按当前 wandb key 查找或创建项目。
+// Model matches Project and finds or creates a project under the current wandb key.
 func (r *queryResolver) Model(ctx context.Context, name *string, entityName *string) (*Project, error) {
+	// Agent: 忽略客户端传入的 entityName。
+	_ = entityName
 	projectName := "default"
 	if name != nil {
 		projectName = *name
 	}
-	entity := "local"
-	if entityName != nil {
-		entity = *entityName
-	}
+	// Agent: 按本次请求的 wandb key 归属项目。
+	entity := auth.EntityFromContext(ctx)
 
 	proj, err := r.Store.EnsureProject(entity, projectName)
 	if err != nil {

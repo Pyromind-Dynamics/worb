@@ -1,11 +1,29 @@
+# Agent: 构建阶段拉齐依赖；MySQL 驱动 go-sql-driver/mysql 随 go.mod 编进二进制，运行时无需再装客户端库。
 FROM golang:1.24-bookworm AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
+# Agent: 确认 MySQL 驱动模块已解析，避免镜像缺驱动却在运行期才报错。
+RUN go list -m github.com/go-sql-driver/mysql
 COPY . .
+# Agent: 纯 Go 驱动（MySQL / SQLite modernc），关 CGO 产出静态二进制，方便 slim 运行镜像直接跑 MySQL。
+ENV CGO_ENABLED=0
 RUN go build -trimpath -ldflags="-s -w" -o /worb .
 
 FROM debian:bookworm-slim
+# Agent: ca-certificates 供 MySQL TLS（DB_SSL_ENABLED）与外连校验使用；slim 默认不含。
+RUN apt-get update \
+	&& apt-get install -y --no-install-recommends ca-certificates \
+	&& rm -rf /var/lib/apt/lists/* \
+	&& mkdir -p /data /etc/secrets
 COPY --from=build /worb /usr/local/bin/worb
-EXPOSE 8080
-ENTRYPOINT ["worb", "--host", "0.0.0.0"]
+# Agent: 生产镜像默认服务端口 8890（namespace=webapp）。
+EXPOSE 8890
+# Agent: /data 默认数据目录；/etc/secrets 留给 MySQL 的 db_* 与可选 CA 挂载。
+VOLUME ["/data", "/etc/secrets"]
+# Agent: 容器启动时读取 host、port、dataDir、dbEngine，作为 main.go 的 4 个启动参数。
+# Agent: 生产默认 --port 8890；环境变量 port 可覆盖。
+# Agent: dbEngine=mysql 时二进制内已含 MySQL 驱动，只需挂 /etc/secrets 且库表已建好即可连库。
+# Agent: 环境变量未设置时使用冒号后的默认值；docker run 追加的参数排在后面，可覆盖同名参数。
+# Agent: exec 让 worb 成为 1 号进程，只在启动时读一次环境变量。
+ENTRYPOINT ["sh", "-c", "exec worb --host \"${host:-0.0.0.0}\" --port \"${port:-8890}\" --data \"${dataDir:-/data}\" --db-engine \"${dbEngine:-sqlite}\" \"$@\"", "worb"]
