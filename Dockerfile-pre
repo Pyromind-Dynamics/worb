@@ -8,7 +8,8 @@ RUN go list -m github.com/go-sql-driver/mysql
 COPY . .
 # Agent: 纯 Go 驱动（MySQL / SQLite modernc），关 CGO 产出静态二进制，方便 slim 运行镜像直接跑 MySQL。
 ENV CGO_ENABLED=0
-RUN go build -trimpath -ldflags="-s -w" -o /worb .
+# Agent: CI/Kaniko 构建上下文常无完整 .git，关闭 VCS stamping 避免 go build exit 128。
+RUN go build -buildvcs=false -trimpath -ldflags="-s -w" -o /worb .
 
 FROM debian:bookworm-slim
 # Agent: ca-certificates 供 MySQL TLS（DB_SSL_ENABLED）与外连校验使用；slim 默认不含。
