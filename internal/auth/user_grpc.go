@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -129,8 +130,13 @@ func probeUserService(ctx context.Context, rpc queryAPI) error {
 	})
 	// Agent: 拨号失败、超时、传输错误或没有回包都无法启动。success=false 仍算调用已通。
 	if err != nil || resp == nil {
-		log.Printf("query_user_by_token startup check failed code=%s", status.Code(err))
-		return fmt.Errorf("USER_GRPC_ADDR is unreachable")
+		// Agent: 没有回包时补上原因，避免日志里只剩一个状态码。
+		if err == nil {
+			err = errors.New("empty response")
+		}
+		// Agent: 启动检查不带 wandb key，传输错误可以原样写入日志。
+		log.Printf("query_user_by_token startup check failed code=%s err=%v", status.Code(err), err)
+		return fmt.Errorf("USER_GRPC_ADDR is unreachable: %w", err)
 	}
 	return nil
 }

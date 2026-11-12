@@ -21,6 +21,10 @@ func main() {
 	cmd := &cobra.Command{
 		Use:   "worb",
 		Short: "Local, single-binary server compatible with the standard wandb Python client",
+		// Agent: 启动失败时不打印整段用法，避免把错误原因淹没掉。
+		SilenceUsage: true,
+		// Agent: 错误由下面的 log.Fatal 打出，避免和 cobra 再打一遍。
+		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			srv, err := server.New(server.Config{
 				Host:     host,

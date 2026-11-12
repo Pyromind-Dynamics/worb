@@ -253,8 +253,12 @@ func New(dataDir, engine string) (*DB, error) {
 		return nil, fmt.Errorf("data dir is not accessible: %w", err)
 	}
 	info, err := os.Stat(dataDir)
-	if err != nil || !info.IsDir() {
-		return nil, fmt.Errorf("data dir is not accessible")
+	// Agent: 把 Stat 失败和“不是目录”分开，日志里能看到具体原因。
+	if err != nil {
+		return nil, fmt.Errorf("data dir is not accessible: %w", err)
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("data dir is not accessible: %s is not a directory", dataDir)
 	}
 
 	var db *sql.DB

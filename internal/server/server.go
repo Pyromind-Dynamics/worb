@@ -49,22 +49,22 @@ type Server struct {
 func New(cfg Config) (*Server, error) {
 	// Agent: 地址缺失或 CA 读不到时先失败，避免先打开数据库再退出。
 	if err := auth.OpenFromEnv(); err != nil {
-		return nil, err
+		return nil, logStartup("grpc", err)
 	}
 	db, err := store.New(cfg.DataDir, cfg.DBEngine)
 	if err != nil {
-		return nil, fmt.Errorf("init store: %w", err)
+		return nil, logStartup("store", fmt.Errorf("init store: %w", err))
 	}
 
 	filesDir := filepath.Join(cfg.DataDir, "files")
 	fs, err := filestore.New(filesDir)
 	if err != nil {
-		return nil, fmt.Errorf("init filestore: %w", err)
+		return nil, logStartup("filestore", fmt.Errorf("init filestore: %w", err))
 	}
 	// Agent: 对象存储和飞书都只在启动时读一次。未配置则不上云、不发飞书。
 	cloudClient, err := objectstore.Open(os.Getenv("OBJECT_STORE"), "/etc/secrets")
 	if err != nil {
-		return nil, err
+		return nil, logStartup("object store", err)
 	}
 	alerts := alert.New("/etc/secrets")
 	pipe := filecloud.Start(db, cloudClient, alerts, cfg.DataDir, os.Getenv("OBJECT_STORE"))
@@ -169,7 +169,19 @@ func (s *Server) setupRoutes() {
 func (s *Server) Run() error {
 	addr := fmt.Sprintf("%s:%d", s.config.Host, s.config.Port)
 	log.Printf("worb listening on http://%s (db: %s)", addr, s.config.DBEngine)
-	return http.ListenAndServe(addr, s.router)
+	// Agent: 端口被占用或地址无效时，先记下原因再把错误交回进程退出。
+	if err := http.ListenAndServe(addr, s.router); err != nil {
+		return logStartup("listen", err)
+	}
+	return nil
+}
+
+// logStartup 把启动失败的检查项和原因打到标准错误，再把同一错误交回调用方。
+// logStartup logs the failed startup check and its cause, then returns that error.
+func logStartup(step string, err error) error {
+	// Agent: 这些错误只含检查项和原因，不含数据库密码、OSS 密钥、wandb key 或证书正文。
+	log.Printf("startup failed: %s: %v", step, err)
+	return fmt.Errorf("%s: %w", step, err)
 }
 
 func corsMiddleware(next http.Handler) http.Handler {

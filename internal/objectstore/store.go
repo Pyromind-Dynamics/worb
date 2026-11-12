@@ -72,8 +72,16 @@ func LoadConfig(dir string, pathStyle bool) (Config, error) {
 	if cfg.SessionToken, err = read("object_store_session_token", false); err != nil {
 		return Config{}, err
 	}
-	if cfg.Endpoint == "" || cfg.Bucket == "" || cfg.AccessKey == "" || cfg.SecretKey == "" {
-		return Config{}, errors.New("object store secret is empty")
+	// Agent: 只报空的文件名，不把密钥内容写进错误。
+	switch {
+	case cfg.Endpoint == "":
+		return Config{}, errors.New("object_store_endpoint is empty")
+	case cfg.Bucket == "":
+		return Config{}, errors.New("object_store_bucket is empty")
+	case cfg.AccessKey == "":
+		return Config{}, errors.New("object_store_access_key is empty")
+	case cfg.SecretKey == "":
+		return Config{}, errors.New("object_store_secret_key is empty")
 	}
 	if cfg.Region == "" {
 		cfg.Region = "us-east-1"
