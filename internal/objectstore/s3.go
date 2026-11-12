@@ -2,11 +2,14 @@ package objectstore
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -16,19 +19,17 @@ import (
 	"github.com/aws/smithy-go"
 )
 
-const ossPingTimeout = 30 * time.Second
+const (
+	ossPingTimeout = 30 * time.Second
+	// Agent: 探测对象内容固定且不含密钥，用来确认读回的就是刚写上的字节。
+	probeBody = "worb-startup"
+)
 
-// bucketHead 只用于启动时确认桶能访问。测试可以替换。
-// bucketHead is the startup bucket check. Tests can substitute it.
-type bucketHead interface {
-	HeadBucket(ctx context.Context, params *s3.HeadBucketInput, optFns ...func(*s3.Options)) (*s3.HeadBucketOutput, error)
-}
-
-// objectAPI 是上传、删除和启动检查用到的对象存储调用。
-// objectAPI is the object storage calls used for upload, delete, and the startup check.
+// objectAPI 是上传、读取、删除和启动检查用到的对象存储调用。
+// objectAPI is the object storage calls used for upload, read, delete, and the startup check.
 type objectAPI interface {
-	HeadBucket(ctx context.Context, params *s3.HeadBucketInput, optFns ...func(*s3.Options)) (*s3.HeadBucketOutput, error)
 	PutObject(ctx context.Context, params *s3.PutObjectInput, optFns ...func(*s3.Options)) (*s3.PutObjectOutput, error)
+	GetObject(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error)
 	DeleteObject(ctx context.Context, params *s3.DeleteObjectInput, optFns ...func(*s3.Options)) (*s3.DeleteObjectOutput, error)
 }
 
@@ -42,10 +43,10 @@ type presignAPI interface {
 // s3API talks to Alibaba Cloud OSS through its S3-compatible API.
 type s3API struct {
 	bucket string
-	// Agent: client 只连内网地址，负责上传、删除和内网连通检查。
+	// Agent: client 只连内网地址，负责业务上传、读取、删除，以及启动时的内网检查。
 	client objectAPI
-	// Agent: pub 只连公网地址，启动时检查它，签名也从这条客户端生成。
-	pub     bucketHead
+	// Agent: public 只连公网地址。业务下载仍走签名，启动时用它再做一遍三项检查。
+	public  objectAPI
 	presign presignAPI
 }
 
@@ -63,36 +64,94 @@ func newS3Client(cfg Config, endpoint string) *s3.Client {
 // NewS3 创建内网管理客户端和公网签名客户端。OSS 使用 path style。
 // NewS3 builds the internal management client and the public signing client. OSS turns path style on.
 func NewS3(cfg Config) (*s3API, error) {
-	// Agent: 上传和删除走内网地址，不把公网地址用在管理请求上。
+	// Agent: 业务上传和删除走内网地址。公网地址只用于签名和启动检查。
 	internal := newS3Client(cfg, cfg.Endpoint)
-	// Agent: 临时下载地址从公网客户端签发，用户浏览器才能打开。
+	// Agent: 同一个公网客户端既签发临时下载地址，也在启动时做公网三项检查。
 	public := newS3Client(cfg, cfg.EndpointPub)
-	return &s3API{bucket: cfg.Bucket, client: internal, pub: public, presign: s3.NewPresignClient(public)}, nil
+	return &s3API{bucket: cfg.Bucket, client: internal, public: public, presign: s3.NewPresignClient(public)}, nil
 }
 
-// Ping 分别确认内网地址和公网地址都能访问同一个桶。任一失败则进程不能启动。
-// Ping checks that both the internal and public endpoints can reach the same bucket. Either failure stops startup.
+// Ping 对内网地址和公网地址分别做上传、读回、删除。任一地址少一项权限或连不上，进程不能启动。
+// Ping checks upload, read, and delete on the internal endpoint and again on the public endpoint. Either address missing a permission or unreachable stops startup.
 func (s *s3API) Ping(ctx context.Context) error {
-	errInternal := headBucket(ctx, s.client, s.bucket, "internal")
-	var errPublic error
-	// Agent: 没有公网客户端时不能签出用户可打开的地址，同样视为没连上。
-	if s.pub == nil {
-		errPublic = errors.New("oss public endpoint is not configured")
-	} else {
-		errPublic = headBucket(ctx, s.pub, s.bucket, "public")
-	}
-	return errors.Join(errInternal, errPublic)
+	var internalErr, publicErr error
+	var wg sync.WaitGroup
+	wg.Add(2)
+	// Agent: 两个地址各有 30 秒，并行检查，一个地址变慢不会吃掉另一个地址的时间。
+	go func() {
+		defer wg.Done()
+		internalErr = s.probeEndpoint(ctx, s.client, "internal")
+	}()
+	go func() {
+		defer wg.Done()
+		publicErr = s.probeEndpoint(ctx, s.public, "public")
+	}()
+	wg.Wait()
+	return errors.Join(internalErr, publicErr)
 }
 
-// headBucket 对桶做一次 Head。任何错误都表示这个地址没有连上。
-// headBucket issues one Head on the bucket. Any error means this endpoint is not reachable.
-func headBucket(ctx context.Context, api bucketHead, bucket, which string) error {
+// probeEndpoint 在一个地址上依次上传、读回、删除一个探测对象。上传失败不再读和删。
+// probeEndpoint uploads, reads back, and deletes one probe object on one endpoint. A failed upload does not continue to read or delete.
+func (s *s3API) probeEndpoint(ctx context.Context, api objectAPI, which string) error {
+	if api == nil {
+		return fmt.Errorf("oss %s client is missing", which)
+	}
 	callCtx, cancel := context.WithTimeout(ctx, ossPingTimeout)
 	defer cancel()
-	_, err := api.HeadBucket(callCtx, &s3.HeadBucketInput{Bucket: aws.String(bucket)})
+	key, err := probeObjectKey()
 	if err != nil {
-		// Agent: 错误里标明是内网还是公网，不写入密钥。
-		return fmt.Errorf("oss %s endpoint unreachable: %w", which, err)
+		return err
+	}
+	// Agent: 先确认能写。写失败时桶里没有探测对象，不再继续读和删。
+	_, err = api.PutObject(callCtx, &s3.PutObjectInput{
+		Bucket:      aws.String(s.bucket),
+		Key:         aws.String(key),
+		Body:        strings.NewReader(probeBody),
+		ContentType: aws.String("text/plain"),
+	})
+	if err != nil {
+		return fmt.Errorf("oss %s PutObject check failed: %w", which, err)
+	}
+	getErr := readProbe(callCtx, api, s.bucket, key, which)
+	// Agent: 读失败也要删除探测对象，避免在桶里留下这次检查的文件。
+	_, delErr := api.DeleteObject(callCtx, &s3.DeleteObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	})
+	if delErr != nil {
+		delErr = fmt.Errorf("oss %s DeleteObject check failed: %w", which, delErr)
+	}
+	return errors.Join(getErr, delErr)
+}
+
+// probeObjectKey 生成不会和用户文件对象键冲突的探测键。
+// probeObjectKey builds a probe key that does not collide with user file keys.
+func probeObjectKey() (string, error) {
+	var raw [8]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", err
+	}
+	return "worb-startup-probe/" + hex.EncodeToString(raw[:]), nil
+}
+
+// readProbe 读回探测对象并核对内容。失败表示这个地址没有 GetObject 权限或对象不可读。
+// readProbe reads the probe object and checks its body. Failure means this endpoint lacks GetObject or the object is unreadable.
+func readProbe(ctx context.Context, api objectAPI, bucket, key, which string) error {
+	out, err := api.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return fmt.Errorf("oss %s GetObject check failed: %w", which, err)
+	}
+	defer out.Body.Close()
+	got, err := io.ReadAll(out.Body)
+	if err != nil {
+		return fmt.Errorf("oss %s GetObject check failed: %w", which, err)
+	}
+	// Agent: 内容不一致也算这个地址的读取权限检查没有通过。
+	if string(got) != probeBody {
+		return fmt.Errorf("oss %s GetObject check failed: body mismatch", which)
 	}
 	return nil
 }

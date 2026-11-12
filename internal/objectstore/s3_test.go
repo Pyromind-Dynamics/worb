@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -25,10 +26,6 @@ type fakeObjects struct {
 	delErr      error
 }
 
-func (f *fakeObjects) HeadBucket(ctx context.Context, params *s3.HeadBucketInput, optFns ...func(*s3.Options)) (*s3.HeadBucketOutput, error) {
-	return &s3.HeadBucketOutput{}, nil
-}
-
 func (f *fakeObjects) PutObject(ctx context.Context, params *s3.PutObjectInput, optFns ...func(*s3.Options)) (*s3.PutObjectOutput, error) {
 	// Agent: 读完 body，确认上传内容没有被丢掉。
 	b, _ := io.ReadAll(params.Body)
@@ -40,6 +37,10 @@ func (f *fakeObjects) PutObject(ctx context.Context, params *s3.PutObjectInput, 
 		return nil, f.putErr
 	}
 	return &s3.PutObjectOutput{ETag: f.etag}, nil
+}
+
+func (f *fakeObjects) GetObject(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
+	return &s3.GetObjectOutput{Body: io.NopCloser(strings.NewReader(f.body))}, nil
 }
 
 func (f *fakeObjects) DeleteObject(ctx context.Context, params *s3.DeleteObjectInput, optFns ...func(*s3.Options)) (*s3.DeleteObjectOutput, error) {

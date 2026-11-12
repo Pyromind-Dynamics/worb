@@ -20,7 +20,7 @@ func Open(kind, secretDir string) (Client, error) {
 		if err != nil {
 			return nil, err
 		}
-		// Agent: 内网地址和公网地址都要访问到桶，缺一个就不能启动。
+		// Agent: 启动对内网和公网分别检查上传、读取、删除。任一地址少一个权限就不能启动。
 		if err := client.Ping(context.Background()); err != nil {
 			return nil, err
 		}
