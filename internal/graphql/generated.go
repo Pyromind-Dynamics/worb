@@ -38,6 +38,7 @@ type Config struct {
 }
 
 type ResolverRoot interface {
+	Artifact() ArtifactResolver
 	Mutation() MutationResolver
 	Project() ProjectResolver
 	Query() QueryResolver
@@ -64,6 +65,7 @@ type ComplexityRoot struct {
 
 	Artifact struct {
 		CurrentManifest func(childComplexity int) int
+		Files           func(childComplexity int) int
 		ID              func(childComplexity int) int
 		State           func(childComplexity int) int
 	}
@@ -117,6 +119,21 @@ type ComplexityRoot struct {
 	FileNode struct {
 		DirectURL func(childComplexity int) int
 		ID        func(childComplexity int) int
+	}
+
+	FileRead struct {
+		DirectURL func(childComplexity int) int
+		ID        func(childComplexity int) int
+		Name      func(childComplexity int) int
+		URL       func(childComplexity int) int
+	}
+
+	FileReadConnection struct {
+		Edges func(childComplexity int) int
+	}
+
+	FileReadEdge struct {
+		Node func(childComplexity int) int
 	}
 
 	FileUploadInfo struct {
@@ -174,6 +191,7 @@ type ComplexityRoot struct {
 		DisplayName      func(childComplexity int) int
 		EventsLineCount  func(childComplexity int) int
 		EventsTail       func(childComplexity int) int
+		Files            func(childComplexity int) int
 		Group            func(childComplexity int) int
 		HeartbeatAt      func(childComplexity int) int
 		HistoryKeys      func(childComplexity int) int
@@ -258,6 +276,9 @@ type ComplexityRoot struct {
 	}
 }
 
+type ArtifactResolver interface {
+	Files(ctx context.Context, obj *Artifact) (*FileReadConnection, error)
+}
 type MutationResolver interface {
 	UpsertBucket(ctx context.Context, input *UpsertBucketInput, id *string, name *string, entity *string, project *string, config *string, summary *string, state *string, host *string, program *string, commit *string, tags []string, displayName *string, notes *string, groupName *string, jobType *string, sweepName *string, description *string) (*UpsertBucketPayload, error)
 	CreateArtifact(ctx context.Context, input CreateArtifactInput) (*CreateArtifactPayload, error)
@@ -281,6 +302,7 @@ type QueryResolver interface {
 }
 type RunResolver interface {
 	WandbConfig(ctx context.Context, obj *Run, keys []string) (*string, error)
+	Files(ctx context.Context, obj *Run) (*FileReadConnection, error)
 }
 
 type executableSchema struct {
@@ -341,6 +363,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.complexity.Artifact.CurrentManifest(childComplexity), true
+	case "Artifact.files":
+		if e.complexity.Artifact.Files == nil {
+			break
+		}
+
+		return e.complexity.Artifact.Files(childComplexity), true
 	case "Artifact.id":
 		if e.complexity.Artifact.ID == nil {
 			break
@@ -472,6 +500,45 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.complexity.FileNode.ID(childComplexity), true
+
+	case "FileRead.directUrl":
+		if e.complexity.FileRead.DirectURL == nil {
+			break
+		}
+
+		return e.complexity.FileRead.DirectURL(childComplexity), true
+	case "FileRead.id":
+		if e.complexity.FileRead.ID == nil {
+			break
+		}
+
+		return e.complexity.FileRead.ID(childComplexity), true
+	case "FileRead.name":
+		if e.complexity.FileRead.Name == nil {
+			break
+		}
+
+		return e.complexity.FileRead.Name(childComplexity), true
+	case "FileRead.url":
+		if e.complexity.FileRead.URL == nil {
+			break
+		}
+
+		return e.complexity.FileRead.URL(childComplexity), true
+
+	case "FileReadConnection.edges":
+		if e.complexity.FileReadConnection.Edges == nil {
+			break
+		}
+
+		return e.complexity.FileReadConnection.Edges(childComplexity), true
+
+	case "FileReadEdge.node":
+		if e.complexity.FileReadEdge.Node == nil {
+			break
+		}
+
+		return e.complexity.FileReadEdge.Node(childComplexity), true
 
 	case "FileUploadInfo.id":
 		if e.complexity.FileUploadInfo.ID == nil {
@@ -760,6 +827,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.complexity.Run.EventsTail(childComplexity), true
+	case "Run.files":
+		if e.complexity.Run.Files == nil {
+			break
+		}
+
+		return e.complexity.Run.Files(childComplexity), true
 	case "Run.group":
 		if e.complexity.Run.Group == nil {
 			break
@@ -1796,6 +1869,39 @@ func (ec *executionContext) fieldContext_Artifact_currentManifest(_ context.Cont
 	return fc, nil
 }
 
+func (ec *executionContext) _Artifact_files(ctx context.Context, field graphql.CollectedField, obj *Artifact) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Artifact_files,
+		func(ctx context.Context) (any, error) {
+			return ec.resolvers.Artifact().Files(ctx, obj)
+		},
+		nil,
+		ec.marshalOFileReadConnection2ᚖgithubᚗcomᚋsarnaᚋworbᚋinternalᚋgraphqlᚐFileReadConnection,
+		true,
+		false,
+	)
+}
+
+func (ec *executionContext) fieldContext_Artifact_files(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Artifact",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "edges":
+				return ec.fieldContext_FileReadConnection_edges(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type FileReadConnection", field.Name)
+		},
+	}
+	return fc, nil
+}
+
 func (ec *executionContext) _ArtifactManifest_id(ctx context.Context, field graphql.CollectedField, obj *ArtifactManifest) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -1890,6 +1996,8 @@ func (ec *executionContext) fieldContext_CommitArtifactPayload_artifact(_ contex
 				return ec.fieldContext_Artifact_state(ctx, field)
 			case "currentManifest":
 				return ec.fieldContext_Artifact_currentManifest(ctx, field)
+			case "files":
+				return ec.fieldContext_Artifact_files(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type Artifact", field.Name)
 		},
@@ -1995,6 +2103,8 @@ func (ec *executionContext) fieldContext_CreateArtifactPayload_artifact(_ contex
 				return ec.fieldContext_Artifact_state(ctx, field)
 			case "currentManifest":
 				return ec.fieldContext_Artifact_currentManifest(ctx, field)
+			case "files":
+				return ec.fieldContext_Artifact_files(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type Artifact", field.Name)
 		},
@@ -2377,6 +2487,194 @@ func (ec *executionContext) fieldContext_FileNode_directUrl(_ context.Context, f
 		IsResolver: false,
 		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
 			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _FileRead_id(ctx context.Context, field graphql.CollectedField, obj *FileRead) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_FileRead_id,
+		func(ctx context.Context) (any, error) {
+			return obj.ID, nil
+		},
+		nil,
+		ec.marshalNString2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_FileRead_id(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "FileRead",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _FileRead_name(ctx context.Context, field graphql.CollectedField, obj *FileRead) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_FileRead_name,
+		func(ctx context.Context) (any, error) {
+			return obj.Name, nil
+		},
+		nil,
+		ec.marshalNString2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_FileRead_name(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "FileRead",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _FileRead_url(ctx context.Context, field graphql.CollectedField, obj *FileRead) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_FileRead_url,
+		func(ctx context.Context) (any, error) {
+			return obj.URL, nil
+		},
+		nil,
+		ec.marshalOString2ᚖstring,
+		true,
+		false,
+	)
+}
+
+func (ec *executionContext) fieldContext_FileRead_url(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "FileRead",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _FileRead_directUrl(ctx context.Context, field graphql.CollectedField, obj *FileRead) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_FileRead_directUrl,
+		func(ctx context.Context) (any, error) {
+			return obj.DirectURL, nil
+		},
+		nil,
+		ec.marshalOString2ᚖstring,
+		true,
+		false,
+	)
+}
+
+func (ec *executionContext) fieldContext_FileRead_directUrl(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "FileRead",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _FileReadConnection_edges(ctx context.Context, field graphql.CollectedField, obj *FileReadConnection) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_FileReadConnection_edges,
+		func(ctx context.Context) (any, error) {
+			return obj.Edges, nil
+		},
+		nil,
+		ec.marshalNFileReadEdge2ᚕᚖgithubᚗcomᚋsarnaᚋworbᚋinternalᚋgraphqlᚐFileReadEdgeᚄ,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_FileReadConnection_edges(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "FileReadConnection",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "node":
+				return ec.fieldContext_FileReadEdge_node(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type FileReadEdge", field.Name)
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _FileReadEdge_node(ctx context.Context, field graphql.CollectedField, obj *FileReadEdge) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_FileReadEdge_node,
+		func(ctx context.Context) (any, error) {
+			return obj.Node, nil
+		},
+		nil,
+		ec.marshalNFileRead2ᚖgithubᚗcomᚋsarnaᚋworbᚋinternalᚋgraphqlᚐFileRead,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_FileReadEdge_node(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "FileReadEdge",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "id":
+				return ec.fieldContext_FileRead_id(ctx, field)
+			case "name":
+				return ec.fieldContext_FileRead_name(ctx, field)
+			case "url":
+				return ec.fieldContext_FileRead_url(ctx, field)
+			case "directUrl":
+				return ec.fieldContext_FileRead_directUrl(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type FileRead", field.Name)
 		},
 	}
 	return fc, nil
@@ -3245,6 +3543,8 @@ func (ec *executionContext) fieldContext_Project_run(ctx context.Context, field 
 				return ec.fieldContext_Run_user(ctx, field)
 			case "wandbConfig":
 				return ec.fieldContext_Run_wandbConfig(ctx, field)
+			case "files":
+				return ec.fieldContext_Run_files(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type Run", field.Name)
 		},
@@ -3348,6 +3648,8 @@ func (ec *executionContext) fieldContext_Project_bucket(ctx context.Context, fie
 				return ec.fieldContext_Run_user(ctx, field)
 			case "wandbConfig":
 				return ec.fieldContext_Run_wandbConfig(ctx, field)
+			case "files":
+				return ec.fieldContext_Run_files(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type Run", field.Name)
 		},
@@ -4643,6 +4945,39 @@ func (ec *executionContext) fieldContext_Run_wandbConfig(ctx context.Context, fi
 	return fc, nil
 }
 
+func (ec *executionContext) _Run_files(ctx context.Context, field graphql.CollectedField, obj *Run) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Run_files,
+		func(ctx context.Context) (any, error) {
+			return ec.resolvers.Run().Files(ctx, obj)
+		},
+		nil,
+		ec.marshalOFileReadConnection2ᚖgithubᚗcomᚋsarnaᚋworbᚋinternalᚋgraphqlᚐFileReadConnection,
+		true,
+		false,
+	)
+}
+
+func (ec *executionContext) fieldContext_Run_files(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Run",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "edges":
+				return ec.fieldContext_FileReadConnection_edges(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type FileReadConnection", field.Name)
+		},
+	}
+	return fc, nil
+}
+
 func (ec *executionContext) _RunConnection_edges(ctx context.Context, field graphql.CollectedField, obj *RunConnection) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -4797,6 +5132,8 @@ func (ec *executionContext) fieldContext_RunEdge_node(_ context.Context, field g
 				return ec.fieldContext_Run_user(ctx, field)
 			case "wandbConfig":
 				return ec.fieldContext_Run_wandbConfig(ctx, field)
+			case "files":
+				return ec.fieldContext_Run_files(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type Run", field.Name)
 		},
@@ -5200,6 +5537,8 @@ func (ec *executionContext) fieldContext_UpsertBucketPayload_bucket(_ context.Co
 				return ec.fieldContext_Run_user(ctx, field)
 			case "wandbConfig":
 				return ec.fieldContext_Run_wandbConfig(ctx, field)
+			case "files":
+				return ec.fieldContext_Run_files(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type Run", field.Name)
 		},
@@ -7786,12 +8125,45 @@ func (ec *executionContext) _Artifact(ctx context.Context, sel ast.SelectionSet,
 		case "id":
 			out.Values[i] = ec._Artifact_id(ctx, field, obj)
 			if out.Values[i] == graphql.Null {
-				out.Invalids++
+				atomic.AddUint32(&out.Invalids, 1)
 			}
 		case "state":
 			out.Values[i] = ec._Artifact_state(ctx, field, obj)
 		case "currentManifest":
 			out.Values[i] = ec._Artifact_currentManifest(ctx, field, obj)
+		case "files":
+			field := field
+
+			innerFunc := func(ctx context.Context, _ *graphql.FieldSet) (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._Artifact_files(ctx, field, obj)
+				return res
+			}
+
+			if field.Deferrable != nil {
+				dfs, ok := deferred[field.Deferrable.Label]
+				di := 0
+				if ok {
+					dfs.AddField(field)
+					di = len(dfs.Values) - 1
+				} else {
+					dfs = graphql.NewFieldSet([]graphql.CollectedField{field})
+					deferred[field.Deferrable.Label] = dfs
+				}
+				dfs.Concurrently(di, func(ctx context.Context) graphql.Marshaler {
+					return innerFunc(ctx, dfs)
+				})
+
+				// don't run the out.Concurrently() call below
+				out.Values[i] = graphql.Null
+				continue
+			}
+
+			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
 		default:
 			panic("unknown field " + strconv.Quote(field.Name))
 		}
@@ -8226,6 +8598,132 @@ func (ec *executionContext) _FileNode(ctx context.Context, sel ast.SelectionSet,
 			}
 		case "directUrl":
 			out.Values[i] = ec._FileNode_directUrl(ctx, field, obj)
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch(ctx)
+	if out.Invalids > 0 {
+		return graphql.Null
+	}
+
+	atomic.AddInt32(&ec.deferred, int32(len(deferred)))
+
+	for label, dfs := range deferred {
+		ec.processDeferredGroup(graphql.DeferredGroup{
+			Label:    label,
+			Path:     graphql.GetPath(ctx),
+			FieldSet: dfs,
+			Context:  ctx,
+		})
+	}
+
+	return out
+}
+
+var fileReadImplementors = []string{"FileRead"}
+
+func (ec *executionContext) _FileRead(ctx context.Context, sel ast.SelectionSet, obj *FileRead) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, fileReadImplementors)
+
+	out := graphql.NewFieldSet(fields)
+	deferred := make(map[string]*graphql.FieldSet)
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("FileRead")
+		case "id":
+			out.Values[i] = ec._FileRead_id(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "name":
+			out.Values[i] = ec._FileRead_name(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "url":
+			out.Values[i] = ec._FileRead_url(ctx, field, obj)
+		case "directUrl":
+			out.Values[i] = ec._FileRead_directUrl(ctx, field, obj)
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch(ctx)
+	if out.Invalids > 0 {
+		return graphql.Null
+	}
+
+	atomic.AddInt32(&ec.deferred, int32(len(deferred)))
+
+	for label, dfs := range deferred {
+		ec.processDeferredGroup(graphql.DeferredGroup{
+			Label:    label,
+			Path:     graphql.GetPath(ctx),
+			FieldSet: dfs,
+			Context:  ctx,
+		})
+	}
+
+	return out
+}
+
+var fileReadConnectionImplementors = []string{"FileReadConnection"}
+
+func (ec *executionContext) _FileReadConnection(ctx context.Context, sel ast.SelectionSet, obj *FileReadConnection) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, fileReadConnectionImplementors)
+
+	out := graphql.NewFieldSet(fields)
+	deferred := make(map[string]*graphql.FieldSet)
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("FileReadConnection")
+		case "edges":
+			out.Values[i] = ec._FileReadConnection_edges(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch(ctx)
+	if out.Invalids > 0 {
+		return graphql.Null
+	}
+
+	atomic.AddInt32(&ec.deferred, int32(len(deferred)))
+
+	for label, dfs := range deferred {
+		ec.processDeferredGroup(graphql.DeferredGroup{
+			Label:    label,
+			Path:     graphql.GetPath(ctx),
+			FieldSet: dfs,
+			Context:  ctx,
+		})
+	}
+
+	return out
+}
+
+var fileReadEdgeImplementors = []string{"FileReadEdge"}
+
+func (ec *executionContext) _FileReadEdge(ctx context.Context, sel ast.SelectionSet, obj *FileReadEdge) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, fileReadEdgeImplementors)
+
+	out := graphql.NewFieldSet(fields)
+	deferred := make(map[string]*graphql.FieldSet)
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("FileReadEdge")
+		case "node":
+			out.Values[i] = ec._FileReadEdge_node(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
 		default:
 			panic("unknown field " + strconv.Quote(field.Name))
 		}
@@ -8868,6 +9366,39 @@ func (ec *executionContext) _Run(ctx context.Context, sel ast.SelectionSet, obj 
 					}
 				}()
 				res = ec._Run_wandbConfig(ctx, field, obj)
+				return res
+			}
+
+			if field.Deferrable != nil {
+				dfs, ok := deferred[field.Deferrable.Label]
+				di := 0
+				if ok {
+					dfs.AddField(field)
+					di = len(dfs.Values) - 1
+				} else {
+					dfs = graphql.NewFieldSet([]graphql.CollectedField{field})
+					deferred[field.Deferrable.Label] = dfs
+				}
+				dfs.Concurrently(di, func(ctx context.Context) graphql.Marshaler {
+					return innerFunc(ctx, dfs)
+				})
+
+				// don't run the out.Concurrently() call below
+				out.Values[i] = graphql.Null
+				continue
+			}
+
+			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
+		case "files":
+			field := field
+
+			innerFunc := func(ctx context.Context, _ *graphql.FieldSet) (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._Run_files(ctx, field, obj)
 				return res
 			}
 
@@ -9882,6 +10413,70 @@ func (ec *executionContext) marshalNFileEdge2ᚖgithubᚗcomᚋsarnaᚋworbᚋin
 	return ec._FileEdge(ctx, sel, v)
 }
 
+func (ec *executionContext) marshalNFileRead2ᚖgithubᚗcomᚋsarnaᚋworbᚋinternalᚋgraphqlᚐFileRead(ctx context.Context, sel ast.SelectionSet, v *FileRead) graphql.Marshaler {
+	if v == nil {
+		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
+			graphql.AddErrorf(ctx, "the requested element is null which the schema does not allow")
+		}
+		return graphql.Null
+	}
+	return ec._FileRead(ctx, sel, v)
+}
+
+func (ec *executionContext) marshalNFileReadEdge2ᚕᚖgithubᚗcomᚋsarnaᚋworbᚋinternalᚋgraphqlᚐFileReadEdgeᚄ(ctx context.Context, sel ast.SelectionSet, v []*FileReadEdge) graphql.Marshaler {
+	ret := make(graphql.Array, len(v))
+	var wg sync.WaitGroup
+	isLen1 := len(v) == 1
+	if !isLen1 {
+		wg.Add(len(v))
+	}
+	for i := range v {
+		i := i
+		fc := &graphql.FieldContext{
+			Index:  &i,
+			Result: &v[i],
+		}
+		ctx := graphql.WithFieldContext(ctx, fc)
+		f := func(i int) {
+			defer func() {
+				if r := recover(); r != nil {
+					ec.Error(ctx, ec.Recover(ctx, r))
+					ret = nil
+				}
+			}()
+			if !isLen1 {
+				defer wg.Done()
+			}
+			ret[i] = ec.marshalNFileReadEdge2ᚖgithubᚗcomᚋsarnaᚋworbᚋinternalᚋgraphqlᚐFileReadEdge(ctx, sel, v[i])
+		}
+		if isLen1 {
+			f(i)
+		} else {
+			go f(i)
+		}
+
+	}
+	wg.Wait()
+
+	for _, e := range ret {
+		if e == graphql.Null {
+			return graphql.Null
+		}
+	}
+
+	return ret
+}
+
+func (ec *executionContext) marshalNFileReadEdge2ᚖgithubᚗcomᚋsarnaᚋworbᚋinternalᚋgraphqlᚐFileReadEdge(ctx context.Context, sel ast.SelectionSet, v *FileReadEdge) graphql.Marshaler {
+	if v == nil {
+		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
+			graphql.AddErrorf(ctx, "the requested element is null which the schema does not allow")
+		}
+		return graphql.Null
+	}
+	return ec._FileReadEdge(ctx, sel, v)
+}
+
 func (ec *executionContext) marshalNFileUploadInfo2ᚖgithubᚗcomᚋsarnaᚋworbᚋinternalᚋgraphqlᚐFileUploadInfo(ctx context.Context, sel ast.SelectionSet, v *FileUploadInfo) graphql.Marshaler {
 	if v == nil {
 		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
@@ -10499,6 +11094,13 @@ func (ec *executionContext) marshalOFileNode2ᚖgithubᚗcomᚋsarnaᚋworbᚋin
 		return graphql.Null
 	}
 	return ec._FileNode(ctx, sel, v)
+}
+
+func (ec *executionContext) marshalOFileReadConnection2ᚖgithubᚗcomᚋsarnaᚋworbᚋinternalᚋgraphqlᚐFileReadConnection(ctx context.Context, sel ast.SelectionSet, v *FileReadConnection) graphql.Marshaler {
+	if v == nil {
+		return graphql.Null
+	}
+	return ec._FileReadConnection(ctx, sel, v)
 }
 
 func (ec *executionContext) marshalOFileUploadInfo2ᚕᚖgithubᚗcomᚋsarnaᚋworbᚋinternalᚋgraphqlᚐFileUploadInfoᚄ(ctx context.Context, sel ast.SelectionSet, v []*FileUploadInfo) graphql.Marshaler {

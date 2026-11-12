@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+package pyromind.v1;
+
+option go_package = "github.com/sarna/worb/internal/userpb;userpb";
+
+message GrpcResponse {
+  bool success = 1;
+  string message = 2;
+  int32 error_code = 3;
+}
+
+message QueryUserByTokenRequest {
+  string token = 1;
+  string token_type = 2;
+}
+
+message UserClusterInfo {
+  int64 id = 1;
+  int64 uid = 2;
+  string status = 3;
+  string user_type = 4;
+}
+
+message UserInfoResponse {
+  GrpcResponse base = 1;
+  UserClusterInfo user_cluster_info = 2;
+  string token_type = 3;
+}
+
+service UserClusterService {
+  rpc query_user_by_token(QueryUserByTokenRequest) returns (UserInfoResponse);
+}

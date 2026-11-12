@@ -33,3 +33,9 @@ models:
     fields:
       wandbConfig:
         resolver: true
+      files:
+        resolver: true
+  Artifact:
+    fields:
+      files:
+        resolver: true

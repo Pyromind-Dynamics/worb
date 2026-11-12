@@ -256,3 +256,77 @@ func TestPurgeNoDeletedData(t *testing.T) {
 		t.Error("expected more=false when nothing is deleted")
 	}
 }
+
+// TestPurgeDoesNotHardDeleteFiles 确认 DeleteRun 会软删文件并入队，purge 不硬删文件行。
+// TestPurgeDoesNotHardDeleteFiles checks that DeleteRun soft-deletes files and purge leaves those rows in place.
+func TestPurgeDoesNotHardDeleteFiles(t *testing.T) {
+	db := setupTestDB(t)
+	var queued []string
+	// Agent: 回调代替删除队列，确认 id 是从 DeleteRun 送出的。
+	db.SetFileDeleteNotify(func(ids []string) {
+		queued = append(queued, ids...)
+	})
+	if _, err := db.EnsureProject("local", "purge-files"); err != nil {
+		t.Fatal(err)
+	}
+	run, err := db.UpsertRun(UpsertRunParams{Entity: "local", Project: "purge-files", Name: "run1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.InsertPendingRunFile("run-1", run.ID, "a.log", "/files/upload/run-1", "local"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.InsertFile("legacy", run.ID, "old.log", "/files/upload/legacy"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE files SET object_key=? WHERE id=?`, "obj", "run-1"); err != nil {
+		t.Fatal(err)
+	}
+	visible, err := db.ListVisibleRunFiles(run.ID)
+	if err != nil || len(visible) != 2 || visible[0].ObjectKey != "obj" && visible[1].ObjectKey != "obj" {
+		t.Fatalf("visible %+v %v", visible, err)
+	}
+	if err := db.DeleteRun(run.ID); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, id := range queued {
+		got[id] = true
+	}
+	if len(queued) != 2 || !got["run-1"] || !got["legacy"] {
+		t.Fatalf("queued %#v", queued)
+	}
+	visible, err = db.ListVisibleRunFiles(run.ID)
+	if err != nil || len(visible) != 0 {
+		t.Fatalf("soft-deleted still visible %+v %v", visible, err)
+	}
+	more, err := db.purgeDeletedData(100)
+	if err != nil || !more {
+		t.Fatalf("purge while files remain %v %v", more, err)
+	}
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM files WHERE run_id=?`, run.ID).Scan(&n); err != nil || n != 2 {
+		t.Fatalf("file rows left %d %v", n, err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM runs WHERE id=?`, run.ID).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("run rows %d %v", n, err)
+	}
+	if err := db.HardDeleteStoredFile("run-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.HardDeleteStoredFile("legacy"); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		more, err = db.purgeDeletedData(100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !more {
+			break
+		}
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM runs WHERE id=?`, run.ID).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("run still present %d %v", n, err)
+	}
+}

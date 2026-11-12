@@ -403,6 +403,8 @@ func (db *DB) ListRunsLite(projectID string) ([]*Run, error) {
 	return runs, nil
 }
 
+// DeleteRun 软删 run，并把它名下尚未软删的文件行送进删除队列。
+// DeleteRun soft-deletes a run and queues its live file rows for cleanup.
 func (db *DB) DeleteRun(runID string) error {
 	res, err := db.Exec(db.SQL(SQLSoftDeleteRun), runID)
 	if err != nil {
@@ -412,6 +414,12 @@ func (db *DB) DeleteRun(runID string) error {
 	if n == 0 {
 		return fmt.Errorf("run not found: %s", runID)
 	}
+	// Agent: 不依赖 HTTP 层。直接调用 DeleteRun 也会软删文件并入队。
+	ids, err := db.softDeleteLiveRunFiles(runID)
+	if err != nil {
+		return err
+	}
+	db.notifyFileDelete(ids)
 	return nil
 }
 
@@ -433,7 +441,16 @@ func (db *DB) DeleteProject(projectID string) error {
 	if n == 0 {
 		return fmt.Errorf("project not found: %s", projectID)
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	// Agent: 项目提交成功后再软删文件。失败时留给 purge 补软删并入队。
+	ids, err := db.softDeleteLiveProjectFiles(projectID)
+	if err != nil {
+		return err
+	}
+	db.notifyFileDelete(ids)
+	return nil
 }
 
 func (db *DB) ListRunsFiltered(projectID string, displayName string) ([]*Run, error) {

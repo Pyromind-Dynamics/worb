@@ -16,8 +16,22 @@ import (
 	"github.com/sarna/worb/internal/store"
 )
 
-// UpsertBucket 创建或更新 run，项目归属使用本次请求的 wandb key。
-// UpsertBucket creates or updates a run and assigns it to the request wandb key.
+// Files 返回 artifact 尚未软删的文件。有 object_key 时 directUrl 是现签地址。
+// Files returns artifact files that are not soft-deleted. directUrl is signed when an object key exists.
+func (r *artifactResolver) Files(ctx context.Context, obj *Artifact) (*FileReadConnection, error) {
+	// Agent: 创建时的 manifest directUrl 不走这里，仍是 PUT 地址。
+	if obj == nil || obj.ID == "" {
+		return &FileReadConnection{Edges: []*FileReadEdge{}}, nil
+	}
+	files, err := r.Store.ListVisibleArtifactFiles(obj.ID)
+	if err != nil {
+		return nil, err
+	}
+	return r.readFiles(ctx, files), nil
+}
+
+// UpsertBucket 创建或更新 run，项目归属使用本次请求的 user_id。
+// UpsertBucket creates or updates a run and assigns it to the request user_id.
 func (r *mutationResolver) UpsertBucket(ctx context.Context, input *UpsertBucketInput, id *string, name *string, entity *string, project *string, config *string, summary *string, state *string, host *string, program *string, commit *string, tags []string, displayName *string, notes *string, groupName *string, jobType *string, sweepName *string, description *string) (*UpsertBucketPayload, error) {
 	// Agent: 调用方传入的 entity 不参与归属。
 	_ = entity
@@ -86,7 +100,7 @@ func (r *mutationResolver) UpsertBucket(ctx context.Context, input *UpsertBucket
 	if name != nil {
 		params.Name = *name
 	}
-	// Agent: entity 固定为 Authorization 中的 wandb key 原文。
+	// Agent: entity 固定为 Middleware 写入的 user_id，不使用客户端传入的 entity。
 	params.Entity = auth.EntityFromContext(ctx)
 	if project != nil {
 		params.Project = *project
@@ -212,14 +226,14 @@ func (r *mutationResolver) UpsertBucket(ctx context.Context, input *UpsertBucket
 	}, nil
 }
 
-// CreateArtifact 在当前 wandb key 下登记 artifact。
-// CreateArtifact records an artifact under the current wandb key.
+// CreateArtifact 在当前 user_id 下登记 artifact。
+// CreateArtifact records an artifact under the current user_id.
 func (r *mutationResolver) CreateArtifact(ctx context.Context, input CreateArtifactInput) (*CreateArtifactPayload, error) {
 	projectName := "default"
 	if input.ProjectName != nil {
 		projectName = *input.ProjectName
 	}
-	// Agent: 忽略 input.EntityName，归属取本次请求的 key。
+	// Agent: 忽略 input.EntityName，归属取本次请求的 user_id。
 	proj, err := r.Store.EnsureProject(auth.EntityFromContext(ctx), projectName)
 	if err != nil {
 		return nil, err
@@ -268,12 +282,26 @@ func (r *mutationResolver) CommitArtifact(ctx context.Context, input CommitArtif
 	}, nil
 }
 
-// CreateArtifactManifest is the resolver for the createArtifactManifest field.
+// CreateArtifactManifest 登记 artifact 清单文件，directUrl 仍是 worb 的 PUT 地址。
+// CreateArtifactManifest records the manifest file. directUrl stays the worb PUT address.
 func (r *mutationResolver) CreateArtifactManifest(ctx context.Context, input CreateArtifactManifestInput) (*CreateArtifactManifestPayload, error) {
-	manifestID := uuid.New().String()
-	fileID := uuid.New().String()
+	artifact, err := r.Store.GetArtifact(input.ArtifactID)
+	if err != nil {
+		return nil, fmt.Errorf("find artifact: %w", err)
+	}
+	name, err := store.CleanObjectName(input.Name)
+	if err != nil {
+		return nil, err
+	}
+	// Agent: id 使用 art- 前缀，上传和查表都靠这个前缀。
+	fileID := "art-" + uuid.New().String()
 	uploadURL := fmt.Sprintf("%s/files/upload/%s", GetBaseURL(ctx), fileID)
-
+	// Agent: entity 是 Middleware 写入的 user_id。
+	entity := auth.EntityFromContext(ctx)
+	if err := r.Store.InsertPendingArtifactFile(fileID, artifact.RunID, artifact.ID, name, uploadURL, entity); err != nil {
+		return nil, err
+	}
+	manifestID := uuid.New().String()
 	return &CreateArtifactManifestPayload{
 		ArtifactManifest: &ArtifactManifest{
 			ID: manifestID,
@@ -285,35 +313,48 @@ func (r *mutationResolver) CreateArtifactManifest(ctx context.Context, input Cre
 	}, nil
 }
 
-// CreateArtifactFiles is the resolver for the createArtifactFiles field.
+// CreateArtifactFiles 为 artifact 的每个文件登记 pending 行，上传地址指向 worb。
+// CreateArtifactFiles records a pending row per artifact file. Upload URLs point at worb.
 func (r *mutationResolver) CreateArtifactFiles(ctx context.Context, input CreateArtifactFilesInput) (*CreateArtifactFilesPayload, error) {
+	artifact, err := r.Store.GetArtifact(input.ArtifactID)
+	if err != nil {
+		return nil, fmt.Errorf("find artifact: %w", err)
+	}
+	// Agent: entity 是 Middleware 写入的 user_id。
+	entity := auth.EntityFromContext(ctx)
 	var edges []*FileEdge
 	for _, f := range input.Files {
-		fileID := uuid.New().String()
+		name, err := store.CleanObjectName(f.Name)
+		if err != nil {
+			return nil, err
+		}
+		fileID := "art-" + uuid.New().String()
 		uploadURL := fmt.Sprintf("%s/files/upload/%s", GetBaseURL(ctx), fileID)
+		if err := r.Store.InsertPendingArtifactFile(fileID, artifact.RunID, artifact.ID, name, uploadURL, entity); err != nil {
+			return nil, err
+		}
 		edges = append(edges, &FileEdge{
 			Node: &FileUploadInfo{
 				ID:            fileID,
-				Name:          f.Name,
+				Name:          name,
 				UploadURL:     &uploadURL,
 				UploadHeaders: []string{},
 			},
 		})
 	}
-
 	return &CreateArtifactFilesPayload{
 		Files: &FileConnection{Edges: edges},
 	}, nil
 }
 
-// CreateRunFiles 为当前 wandb key 下的 run 登记待上传文件。
-// CreateRunFiles registers upload files for a run owned by the current wandb key.
+// CreateRunFiles 为当前 user_id 下的 run 登记待上传文件。
+// CreateRunFiles registers upload files for a run owned by the current user_id.
 func (r *mutationResolver) CreateRunFiles(ctx context.Context, input CreateRunFilesInput) (*CreateRunFilesPayload, error) {
 	projectName := "default"
 	if input.ProjectName != nil {
 		projectName = *input.ProjectName
 	}
-	// Agent: 忽略 input.EntityName，归属取本次请求的 key。
+	// Agent: 忽略 input.EntityName，归属取本次请求的 user_id。
 	proj, err := r.Store.EnsureProject(auth.EntityFromContext(ctx), projectName)
 	if err != nil {
 		return nil, err
@@ -324,17 +365,26 @@ func (r *mutationResolver) CreateRunFiles(ctx context.Context, input CreateRunFi
 		return nil, fmt.Errorf("find run: %w", err)
 	}
 
+	// Agent: entity 是 Middleware 写入的 user_id。
+	entity := auth.EntityFromContext(ctx)
 	var files []*FileUploadInfo
 	for _, fname := range input.Files {
-		fileID := uuid.New().String()
+		name, err := store.CleanObjectName(fname)
+		if err != nil {
+			return nil, err
+		}
+		// Agent: run- 前缀同时是主键、本地文件名和选表依据。
+		fileID := "run-" + uuid.New().String()
 		uploadURL := fmt.Sprintf("%s/files/upload/%s", GetBaseURL(ctx), fileID)
+		if err := r.Store.InsertPendingRunFile(fileID, run.ID, name, uploadURL, entity); err != nil {
+			return nil, err
+		}
 		files = append(files, &FileUploadInfo{
 			ID:            fileID,
-			Name:          fname,
+			Name:          name,
 			UploadURL:     &uploadURL,
 			UploadHeaders: []string{},
 		})
-		r.Store.InsertFile(fileID, run.ID, fname, uploadURL)
 	}
 
 	return &CreateRunFilesPayload{
@@ -420,10 +470,10 @@ func (r *projectResolver) Bucket(ctx context.Context, obj *Project, name string,
 	return storeRunToGQL(run), nil
 }
 
-// Viewer 返回当前 wandb key，供客户端作为默认 entity。
-// Viewer returns the current wandb key so the client can use it as the default entity.
+// Viewer 返回当前 user_id，供客户端作为默认 entity。
+// Viewer returns the current user_id so the client can use it as the default entity.
 func (r *queryResolver) Viewer(ctx context.Context) (*User, error) {
-	// Agent: entity 即 Middleware 保存的 key 原文。
+	// Agent: entity 即 Middleware 保存的 user_id。
 	entity := auth.EntityFromContext(ctx)
 	flags := "{}"
 	return &User{
@@ -438,8 +488,8 @@ func (r *queryResolver) Viewer(ctx context.Context) (*User, error) {
 	}, nil
 }
 
-// Project 按当前 wandb key 查找或创建项目。
-// Project finds or creates a project under the current wandb key.
+// Project 按当前 user_id 查找或创建项目。
+// Project finds or creates a project under the current user_id.
 func (r *queryResolver) Project(ctx context.Context, name *string, entityName *string) (*Project, error) {
 	// Agent: 忽略客户端传入的 entityName。
 	_ = entityName
@@ -447,7 +497,7 @@ func (r *queryResolver) Project(ctx context.Context, name *string, entityName *s
 	if name != nil {
 		projectName = *name
 	}
-	// Agent: 按本次请求的 wandb key 归属项目。
+	// Agent: 按本次请求的 user_id 归属项目。
 	entity := auth.EntityFromContext(ctx)
 
 	proj, err := r.Store.EnsureProject(entity, projectName)
@@ -466,8 +516,8 @@ func (r *queryResolver) Project(ctx context.Context, name *string, entityName *s
 	}, nil
 }
 
-// Model 与 Project 相同，按当前 wandb key 查找或创建项目。
-// Model matches Project and finds or creates a project under the current wandb key.
+// Model 与 Project 相同，按当前 user_id 查找或创建项目。
+// Model matches Project and finds or creates a project under the current user_id.
 func (r *queryResolver) Model(ctx context.Context, name *string, entityName *string) (*Project, error) {
 	// Agent: 忽略客户端传入的 entityName。
 	_ = entityName
@@ -475,7 +525,7 @@ func (r *queryResolver) Model(ctx context.Context, name *string, entityName *str
 	if name != nil {
 		projectName = *name
 	}
-	// Agent: 按本次请求的 wandb key 归属项目。
+	// Agent: 按本次请求的 user_id 归属项目。
 	entity := auth.EntityFromContext(ctx)
 
 	proj, err := r.Store.EnsureProject(entity, projectName)
@@ -562,6 +612,48 @@ func (r *runResolver) WandbConfig(ctx context.Context, obj *Run, keys []string) 
 	return &s, nil
 }
 
+// Files 返回 run 尚未软删的文件。url 固定为 upload 路径，directUrl 在有 object_key 时现签。
+// Files returns run files that are not soft-deleted. url stays the upload path, and directUrl is signed when an object key exists.
+func (r *runResolver) Files(ctx context.Context, obj *Run) (*FileReadConnection, error) {
+	if obj == nil || obj.ID == "" {
+		return &FileReadConnection{Edges: []*FileReadEdge{}}, nil
+	}
+	files, err := r.Store.ListVisibleRunFiles(obj.ID)
+	if err != nil {
+		return nil, err
+	}
+	return r.readFiles(ctx, files), nil
+}
+
+// readFiles 把库里的文件行转成查询结果。签名失败时 directUrl 仍用 upload 路径。
+// readFiles maps stored files into the query result. A signing failure keeps directUrl on the upload path.
+func (r *Resolver) readFiles(ctx context.Context, files []store.VisibleFile) *FileReadConnection {
+	edges := make([]*FileReadEdge, 0, len(files))
+	for _, f := range files {
+		// Agent: 查询返回的 url 始终是 /files/upload/{id}，不改成云端地址。
+		url := "/files/upload/" + f.ID
+		direct := url
+		if f.ObjectKey != "" && r.Sign != nil {
+			// Agent: 只对非空 object_key 现签，有效期由签名实现固定为 24 小时，不入库。
+			if signed, err := r.Sign(ctx, f.ObjectKey); err == nil && signed != "" {
+				direct = signed
+			}
+		}
+		urlCopy := url
+		directCopy := direct
+		edges = append(edges, &FileReadEdge{Node: &FileRead{
+			ID:        f.ID,
+			Name:      f.Name,
+			URL:       &urlCopy,
+			DirectURL: &directCopy,
+		}})
+	}
+	return &FileReadConnection{Edges: edges}
+}
+
+// Artifact returns ArtifactResolver implementation.
+func (r *Resolver) Artifact() ArtifactResolver { return &artifactResolver{r} }
+
 // Mutation returns MutationResolver implementation.
 func (r *Resolver) Mutation() MutationResolver { return &mutationResolver{r} }
 
@@ -574,6 +666,7 @@ func (r *Resolver) Query() QueryResolver { return &queryResolver{r} }
 // Run returns RunResolver implementation.
 func (r *Resolver) Run() RunResolver { return &runResolver{r} }
 
+type artifactResolver struct{ *Resolver }
 type mutationResolver struct{ *Resolver }
 type projectResolver struct{ *Resolver }
 type queryResolver struct{ *Resolver }

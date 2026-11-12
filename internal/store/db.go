@@ -63,6 +63,10 @@ type DB struct {
 	cancel       context.CancelFunc
 	sqlPerf      *sqlPerfTracker
 	storageCache *storageUsageCache
+	// Agent: 删除队列在 filecloud，store 只保留回调。hook 尚未装上时先记下 id。
+	fileDeleteMu      sync.Mutex
+	fileDeleteFn      func([]string)
+	fileDeletePending []string
 }
 
 type SQLPerfTopQuery struct {
@@ -237,17 +241,23 @@ func (db *DB) isSQLite() bool {
 	return !db.isMySQL()
 }
 
+// New 打开数据目录和数据库。目录不可访问，或 MySQL 配置了但连不上时，进程不能继续。
+// New opens the data directory and the database. An inaccessible directory, or a configured MySQL that cannot be reached, stops the process.
 func New(dataDir, engine string) (*DB, error) {
 	if engine == "" {
 		engine = "sqlite"
 	}
 
+	// Agent: dataDir 必须是可访问的目录，创建失败或不是目录则不能启动。
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
-		return nil, fmt.Errorf("create data dir: %w", err)
+		return nil, fmt.Errorf("data dir is not accessible: %w", err)
+	}
+	info, err := os.Stat(dataDir)
+	if err != nil || !info.IsDir() {
+		return nil, fmt.Errorf("data dir is not accessible")
 	}
 
 	var db *sql.DB
-	var err error
 
 	switch engine {
 	case "sqlite":

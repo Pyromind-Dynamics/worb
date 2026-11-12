@@ -1,10 +1,12 @@
-# Agent: 构建阶段拉齐依赖；MySQL 驱动 go-sql-driver/mysql 随 go.mod 编进二进制，运行时无需再装客户端库。
+# Agent: 构建阶段拉齐依赖。MySQL 驱动与 OSS 客户端都随 go.mod 编进二进制，运行时无需再装客户端库。
 FROM golang:1.24-bookworm AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 # Agent: 确认 MySQL 驱动模块已解析，避免镜像缺驱动却在运行期才报错。
 RUN go list -m github.com/go-sql-driver/mysql
+# Agent: 确认 OSS 客户端模块已解析。本期走 aws-sdk-go-v2 的 S3 接口访问 OSS，不另装阿里云 SDK。
+RUN go list -m github.com/aws/aws-sdk-go-v2 github.com/aws/aws-sdk-go-v2/credentials github.com/aws/aws-sdk-go-v2/service/s3
 COPY . .
 # Agent: 纯 Go 驱动（MySQL / SQLite modernc），关 CGO 产出静态二进制，方便 slim 运行镜像直接跑 MySQL。
 ENV CGO_ENABLED=0

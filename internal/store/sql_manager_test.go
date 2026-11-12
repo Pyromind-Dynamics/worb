@@ -179,9 +179,11 @@ func TestBusyLockCodes(t *testing.T) {
 func TestHistogramPacketSplits(t *testing.T) {
 	prefix := SQLByEngine("mysql", SQLInsertHistsPrefix)
 	row := "(?,?,?,?,?,?)"
+	// Agent: 单行 bins+vals 约 5MiB，超过 4MiB 上限，整批必须拆到 1 行。
+	big := strings.Repeat("1", 2<<20)
 	args := make([]any, 0, 8*6)
 	for i := 0; i < 8; i++ {
-		args = append(args, "run", i, "loss", nil, strings.Repeat("1", 400000), strings.Repeat("2", 400000))
+		args = append(args, "run", i, "loss", nil, big, big)
 	}
 	n := 8
 	for n > 1 && estimateInsert(prefix, row, n, args[:n*6]) > maxSQLPacketBytes {
@@ -189,6 +191,23 @@ func TestHistogramPacketSplits(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("batch width = %d, want 1", n)
+	}
+}
+
+// TestMySQLPacketAdvice 核对推荐值为服务端上限的 1/4，且与应用值不一致时标记 mismatch。
+// TestMySQLPacketAdvice checks recommended cap is server/4 and mismatch when app differs.
+func TestMySQLPacketAdvice(t *testing.T) {
+	rec, mismatch := mysqlPacketAdvice(16<<20, 4<<20)
+	if rec != 4<<20 || mismatch {
+		t.Fatalf("16MiB server + 4MiB app: recommended=%d mismatch=%v", rec, mismatch)
+	}
+	rec, mismatch = mysqlPacketAdvice(64<<20, 4<<20)
+	if rec != 16<<20 || !mismatch {
+		t.Fatalf("64MiB server + 4MiB app: recommended=%d mismatch=%v", rec, mismatch)
+	}
+	rec, mismatch = mysqlPacketAdvice(0, 4<<20)
+	if rec != 0 || mismatch {
+		t.Fatalf("zero server packet: recommended=%d mismatch=%v", rec, mismatch)
 	}
 }
 

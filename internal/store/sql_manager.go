@@ -31,6 +31,26 @@ const (
 	SQLCreateRunKeys  SQLID = 18
 	SQLIdxScalarsStep SQLID = 19
 	SQLIdxRunSteps    SQLID = 20
+	// Agent: 21 起是文件上云表。SQLite 启动补列；MySQL 只作期望结构，不执行。
+	SQLCreateArtifactFiles SQLID = 21
+	SQLAlterFileEntity     SQLID = 22
+	SQLAlterFileEntityKey  SQLID = 23
+	SQLAlterFileLocalPath  SQLID = 24
+	SQLAlterFileLocalAt    SQLID = 25
+	SQLAlterFileStatus     SQLID = 26
+	SQLAlterFileStorage    SQLID = 27
+	SQLAlterFileObjectKey  SQLID = 28
+	SQLAlterFileCloudAt    SQLID = 29
+	SQLAlterFileETag       SQLID = 30
+	SQLAlterFileError      SQLID = 31
+	SQLAlterFileRetry      SQLID = 32
+	SQLAlterFileLocalDel   SQLID = 33
+	SQLAlterFileDeleted    SQLID = 34
+	SQLAlterFileUpdated    SQLID = 35
+	SQLIdxFileEntity       SQLID = 36
+	SQLIdxFileEntityKey    SQLID = 37
+	SQLIdxFileStatus       SQLID = 38
+	SQLIdxFileDeleted      SQLID = 39
 
 	SQLSelectProjectByEntityName SQLID = 100
 	SQLInsertProject             SQLID = 101
@@ -110,6 +130,63 @@ const (
 	SQLDeleteConsBatch      SQLID = 310
 	SQLDeleteFilesBatch     SQLID = 311
 	SQLDeleteArtsBatch      SQLID = 312
+
+	// Agent: 400 段是文件上云的读写语句，两张表分开编号。
+	SQLInsertPendingFile         SQLID = 400
+	SQLInsertPendingArtifactFile SQLID = 401
+	SQLMarkRunFileLocal          SQLID = 402
+	SQLMarkArtFileLocal          SQLID = 403
+	SQLClaimRunUpload            SQLID = 404
+	SQLClaimArtUpload            SQLID = 405
+	SQLSelectRunFile             SQLID = 406
+	SQLSelectArtFile             SQLID = 407
+	SQLFinishRunCloud            SQLID = 408
+	SQLFinishArtCloud            SQLID = 409
+	SQLFailRunUpload             SQLID = 410
+	SQLFailArtUpload             SQLID = 411
+	SQLLeaveRunUploading         SQLID = 412
+	SQLLeaveArtUploading         SQLID = 413
+	SQLSetRunLocalDeleted        SQLID = 414
+	SQLSetArtLocalDeleted        SQLID = 415
+	SQLSoftDeleteRunFiles        SQLID = 416
+	SQLSoftDeleteArtFiles        SQLID = 417
+	SQLSoftDeleteProjectFiles    SQLID = 418
+	SQLSoftDeleteProjectArtFiles SQLID = 419
+	SQLListRunIDsToUpload        SQLID = 420
+	SQLListArtIDsToUpload        SQLID = 421
+	SQLListRunIDsToUnlink        SQLID = 422
+	SQLListArtIDsToUnlink        SQLID = 423
+	SQLCountFilesByRun           SQLID = 424
+	SQLCountArtFilesByRun        SQLID = 425
+	SQLHardDeleteRunFile         SQLID = 426
+	SQLHardDeleteArtFile         SQLID = 427
+	SQLListSoftRunFileIDs        SQLID = 428
+	SQLListSoftArtFileIDs        SQLID = 429
+	SQLListSoftRunFileIDsByRun   SQLID = 430
+	SQLListSoftArtFileIDsByRun   SQLID = 431
+	SQLCountLiveObjectKey        SQLID = 432
+	SQLReapRunUploading          SQLID = 433
+	SQLReapArtUploading          SQLID = 434
+	SQLListStaleRunUploading     SQLID = 435
+	SQLListStaleArtUploading     SQLID = 436
+	SQLListRetryDeleteRun        SQLID = 437
+	SQLListRetryDeleteArt        SQLID = 438
+	SQLCountPermanentFails       SQLID = 439
+	SQLCountArtPermanentFails    SQLID = 440
+	SQLCountPrefixedFilesByRun   SQLID = 441
+	SQLListRunIDsByProject       SQLID = 442
+	SQLStopRunUpload             SQLID = 443
+	SQLStopArtUpload             SQLID = 444
+	SQLJobLock                   SQLID = 445
+	SQLListLiveRunFileIDs        SQLID = 446
+	SQLListLiveArtFileIDs        SQLID = 447
+	SQLListLiveProjectRunFileIDs SQLID = 448
+	SQLListLiveProjectArtFileIDs SQLID = 449
+	SQLSoftDeleteFileByID        SQLID = 450
+	SQLSoftDeleteArtFileByID     SQLID = 451
+	SQLCountAllFilesByRun        SQLID = 452
+	SQLListVisibleRunFiles       SQLID = 453
+	SQLListVisibleArtFiles       SQLID = 454
 )
 
 // Agent: SQLite 与 MySQL 各一份常量表。编号相同，文本按引擎语义分开写。
@@ -120,6 +197,8 @@ func init() {
 	// Agent: 启动时只装一次映射，运行中按编号取值，不做字符串改写。
 	loadSQLiteSQLs()
 	loadMySQLSQLs()
+	// Agent: 文件上云语句在两套映射装完后写入，避免被覆盖。
+	registerFileCloudSQL()
 }
 
 // SQL 按 *DB 的引擎和编号返回对应语句。找不到编号时返回空串。
@@ -162,6 +241,12 @@ func alterSQLIDs() []SQLID {
 	return []SQLID{
 		SQLAlterRunDel, SQLAlterProjDel, SQLAlterRecvHist, SQLAlterForkRun, SQLAlterForkStep,
 		SQLCreateRunKeys, SQLIdxScalarsStep, SQLIdxRunSteps,
+		SQLCreateArtifactFiles,
+		SQLAlterFileEntity, SQLAlterFileEntityKey, SQLAlterFileLocalPath, SQLAlterFileLocalAt,
+		SQLAlterFileStatus, SQLAlterFileStorage, SQLAlterFileObjectKey, SQLAlterFileCloudAt,
+		SQLAlterFileETag, SQLAlterFileError, SQLAlterFileRetry, SQLAlterFileLocalDel,
+		SQLAlterFileDeleted, SQLAlterFileUpdated,
+		SQLIdxFileEntity, SQLIdxFileEntityKey, SQLIdxFileStatus, SQLIdxFileDeleted,
 	}
 }
 
@@ -325,7 +410,7 @@ func loadSQLiteSQLs() {
 		SQLMarkRunFailed:           `UPDATE runs SET state = 'failed', notes = ?, updated_at = current_timestamp WHERE id = ?`,
 		SQLUpdateFileSize:          `UPDATE files SET size = ? WHERE id = ?`,
 		SQLInsertFileIgnore:        `INSERT OR IGNORE INTO files (id, run_id, name, url) VALUES (?, ?, ?, ?)`,
-		SQLListFilesByRun:          `SELECT id, run_id, name, COALESCE(url, ''), COALESCE(size, 0), created_at FROM files WHERE run_id = ? ORDER BY name`,
+		SQLListFilesByRun:          `SELECT id, run_id, name, COALESCE(url, ''), COALESCE(size, 0), created_at FROM files WHERE run_id = ? AND deleted_at IS NULL ORDER BY name`,
 		SQLSelectProjectByID:       `SELECT id, entity, name, created_at FROM projects WHERE id = ? AND deleted_at IS NULL`,
 		SQLSelectProjectByName:     `SELECT id, entity, name, created_at FROM projects WHERE entity = ? AND name = ? AND deleted_at IS NULL`,
 		SQLListAllProjects:         `SELECT id, entity, name, created_at FROM projects WHERE deleted_at IS NULL ORDER BY created_at DESC`,
@@ -496,7 +581,7 @@ func loadMySQLSQLs() {
 		SQLMarkRunFailed:           `UPDATE runs SET state = 'failed', notes = ?, updated_at = current_timestamp WHERE id = ?`,
 		SQLUpdateFileSize:          `UPDATE files SET size = ? WHERE id = ?`,
 		SQLInsertFileIgnore:        `INSERT IGNORE INTO files (id, run_id, name, url) VALUES (?, ?, ?, ?)`,
-		SQLListFilesByRun:          `SELECT id, run_id, name, COALESCE(url, ''), COALESCE(size, 0), created_at FROM files WHERE run_id = ? ORDER BY name`,
+		SQLListFilesByRun:          `SELECT id, run_id, name, COALESCE(url, ''), COALESCE(size, 0), created_at FROM files WHERE run_id = ? AND deleted_at IS NULL ORDER BY name`,
 		SQLSelectProjectByID:       `SELECT id, entity, name, created_at FROM projects WHERE id = ? AND deleted_at IS NULL`,
 		SQLSelectProjectByName:     `SELECT id, entity, name, created_at FROM projects WHERE entity = ? AND name = ? AND deleted_at IS NULL`,
 		SQLListAllProjects:         `SELECT id, entity, name, created_at FROM projects WHERE deleted_at IS NULL ORDER BY created_at DESC`,

@@ -43,11 +43,13 @@ func (db *DB) CreateArtifact(runID, artifactType, name string, metadata json.Raw
 func (db *DB) GetArtifact(id string) (*Artifact, error) {
 	a := &Artifact{}
 	var metadata, digest sql.NullString
+	var created flexTime
 	err := db.QueryRow(db.SQL(SQLSelectArtifact), id).
-		Scan(&a.ID, &a.RunID, &a.Type, &a.Name, &digest, &a.State, &metadata, &a.CreatedAt)
+		Scan(&a.ID, &a.RunID, &a.Type, &a.Name, &digest, &a.State, &metadata, &created)
 	if err != nil {
 		return nil, err
 	}
+	a.CreatedAt = created.Time
 	a.Digest = digest.String
 	if metadata.Valid {
 		a.Metadata = json.RawMessage(metadata.String)

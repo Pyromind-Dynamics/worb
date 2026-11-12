@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -15,10 +16,13 @@ import (
 	"github.com/99designs/gqlgen/graphql/playground"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/sarna/worb/internal/alert"
 	"github.com/sarna/worb/internal/auth"
+	"github.com/sarna/worb/internal/filecloud"
 	"github.com/sarna/worb/internal/filestore"
 	"github.com/sarna/worb/internal/filestream"
 	"github.com/sarna/worb/internal/graphql"
+	"github.com/sarna/worb/internal/objectstore"
 	"github.com/sarna/worb/internal/store"
 	"github.com/sarna/worb/ui"
 	"github.com/vektah/gqlparser/v2/gqlerror"
@@ -35,10 +39,18 @@ type Server struct {
 	config Config
 	store  *store.DB
 	files  *filestore.Store
+	cloud  *filecloud.Pipeline
+	alerts alert.Notifier
 	router *chi.Mux
 }
 
+// New 打开存储并接上按 wandb key 换 user_id 的 gRPC 客户端。
+// New opens storage and the gRPC client that exchanges a wandb key for a user_id.
 func New(cfg Config) (*Server, error) {
+	// Agent: 地址缺失或 CA 读不到时先失败，避免先打开数据库再退出。
+	if err := auth.OpenFromEnv(); err != nil {
+		return nil, err
+	}
 	db, err := store.New(cfg.DataDir, cfg.DBEngine)
 	if err != nil {
 		return nil, fmt.Errorf("init store: %w", err)
@@ -49,11 +61,22 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("init filestore: %w", err)
 	}
+	// Agent: 对象存储和飞书都只在启动时读一次。未配置则不上云、不发飞书。
+	cloudClient, err := objectstore.Open(os.Getenv("OBJECT_STORE"), "/etc/secrets")
+	if err != nil {
+		return nil, err
+	}
+	alerts := alert.New("/etc/secrets")
+	pipe := filecloud.Start(db, cloudClient, alerts, cfg.DataDir, os.Getenv("OBJECT_STORE"))
+	// Agent: DeleteRun、DeleteProject 和 purge 都通过这个回调把软删文件送进删除队列。
+	db.SetFileDeleteNotify(pipe.EnqueueDelete)
 
 	s := &Server{
 		config: cfg,
 		store:  db,
 		files:  fs,
+		cloud:  pipe,
+		alerts: alerts,
 	}
 	s.setupRoutes()
 	return s, nil
@@ -68,6 +91,8 @@ func (s *Server) setupRoutes() {
 
 	gqlResolver := &graphql.Resolver{
 		Store: s.store,
+		// Agent: 查询已有文件时用它现签 directUrl。没有对象存储时签名会失败，地址退回 upload 路径。
+		Sign: s.cloud.Sign,
 	}
 	gqlSrv := handler.NewDefaultServer(graphql.NewExecutableSchema(graphql.Config{Resolvers: gqlResolver}))
 	gqlSrv.SetErrorPresenter(func(ctx context.Context, err error) *gqlerror.Error {
@@ -76,6 +101,8 @@ func (s *Server) setupRoutes() {
 		return gqlErr
 	})
 
+	// Agent: 启动探针访问这个地址。进程还没通过启动连通检查时不会监听，所以这里不会被打到。
+	r.Get("/health", s.handleHealth)
 	r.Handle("/graphql", graphql.BaseURLMiddleware(gqlSrv))
 	r.Handle("/playground", playground.Handler("worb", "/graphql"))
 
@@ -83,10 +110,10 @@ func (s *Server) setupRoutes() {
 	r.Post("/files/{entity}/{project}/{run}/file_stream", fsHandler.ServeHTTP)
 
 	r.Put("/files/upload/{token}", s.handleFileUpload)
-	r.Get("/files/upload/{token}", s.files.Download)
+	r.Get("/files/upload/{token}", s.handleFileDownload)
 
 	r.Get("/api/v1/viewer", func(w http.ResponseWriter, r *http.Request) {
-		// Agent: 把 wandb key 原文作为 entity 回给客户端。
+		// Agent: 回给客户端的 entity 是 user_id。
 		entity := auth.EntityFromContext(r.Context())
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
@@ -158,7 +185,10 @@ func corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// apiListProjects 只返回当前 user_id 下的项目。
+// apiListProjects returns projects owned by the current user_id.
 func (s *Server) apiListProjects(w http.ResponseWriter, r *http.Request) {
+	// Agent: 列表按 context 里的 user_id 过滤。
 	projects, err := s.store.ListProjects(auth.EntityFromContext(r.Context()))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -215,6 +245,7 @@ func (s *Server) apiGetPerfStorageFresh(w http.ResponseWriter, r *http.Request) 
 
 func (s *Server) apiDeleteRun(w http.ResponseWriter, r *http.Request) {
 	runID := chi.URLParam(r, "runID")
+	// Agent: 软删文件和入队在 DeleteRun 内完成，HTTP 层不再做第二次。
 	if err := s.store.DeleteRun(runID); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -225,6 +256,7 @@ func (s *Server) apiDeleteRun(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) apiDeleteProject(w http.ResponseWriter, r *http.Request) {
 	projectID := chi.URLParam(r, "projectID")
+	// Agent: 软删文件和入队在 DeleteProject 内完成，HTTP 层不再做第二次。
 	if err := s.store.DeleteProject(projectID); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -440,14 +472,64 @@ func (s *Server) wandbRunRedirect(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/runs/"+run.ID, http.StatusFound)
 }
 
+// handleHealth 在进程开始监听后返回 200。不访问 MySQL、OSS 或 gRPC。
+// handleHealth returns 200 once the process is listening. It does not contact MySQL, OSS, or gRPC.
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	// Agent: 正文固定为 ok，探针只看状态码。
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("ok"))
+}
+
 func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
-	s.files.Upload(w, r)
 	token := chi.URLParam(r, "token")
-	if token != "" {
-		if info, err := s.files.Stat(token); err == nil {
-			s.store.UpdateFileSize(token, info.Size())
+	// Agent: 无 run-/art- 前缀不落盘，避免写进无法选表的路径。
+	if store.FileKindOf(token) == store.FileKindUnknown {
+		http.Error(w, "invalid file id", http.StatusBadRequest)
+		return
+	}
+	n, err := filecloud.SaveLocal(s.files.Dir, token, r.Body, s.alerts)
+	if err != nil {
+		http.Error(w, "write file", http.StatusInternalServerError)
+		return
+	}
+	path := filepath.Join(s.files.Dir, token)
+	ok, err := s.store.MarkFileLocal(token, path, n)
+	if err != nil || !ok {
+		if err == nil {
+			// Agent: 行已不存在或已软删时删掉刚写入的字节，避免留下无法入队的本地文件。
+			_ = os.Remove(path)
+		}
+		http.Error(w, "file record missing", http.StatusNotFound)
+		return
+	}
+	s.cloud.EnqueueUpload(token)
+	w.WriteHeader(http.StatusOK)
+}
+
+// handleFileDownload 对软删返回 404；本地还在则读盘；只剩云端则 302。
+// handleFileDownload returns 404 for a soft-deleted row, the local file when it exists, or a 302 when only the cloud object remains.
+func (s *Server) handleFileDownload(w http.ResponseWriter, r *http.Request) {
+	token := chi.URLParam(r, "token")
+	file, err := s.store.GetStoredFile(token)
+	if err != nil || file.DeletedAt != "" {
+		http.NotFound(w, r)
+		return
+	}
+	if file.LocalPath != "" {
+		if _, err := os.Stat(file.LocalPath); err == nil {
+			http.ServeFile(w, r, file.LocalPath)
+			return
 		}
 	}
+	if file.ObjectKey != "" {
+		url, err := s.cloud.Sign(r.Context(), file.ObjectKey)
+		if err == nil && url != "" {
+			http.Redirect(w, r, url, http.StatusFound)
+			return
+		}
+	}
+	http.NotFound(w, r)
 }
 
 func (s *Server) apiGetFiles(w http.ResponseWriter, r *http.Request) {

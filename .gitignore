@@ -1,4 +1,5 @@
 worb
+.tools/
 .testdata/
 wandb/
 *.duckdb

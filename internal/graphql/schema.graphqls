@@ -201,6 +201,7 @@ type Run {
   historyKeys: JSONString
   user: RunUser
   wandbConfig(keys: [String!]): JSONString
+  files: FileReadConnection
 }
 
 input CreateArtifactInput {
@@ -229,6 +230,22 @@ type Artifact {
   id: String!
   state: String
   currentManifest: ArtifactManifest
+  files: FileReadConnection
+}
+
+type FileReadConnection {
+  edges: [FileReadEdge!]!
+}
+
+type FileReadEdge {
+  node: FileRead!
+}
+
+type FileRead {
+  id: String!
+  name: String!
+  url: String
+  directUrl: String
 }
 
 type ArtifactManifest {

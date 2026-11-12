@@ -23,8 +23,8 @@ const (
 	mysqlMaxIdleConns    = 8
 	mysqlConnMaxLifetime = 30 * time.Minute
 	mysqlConnMaxIdleTime = 5 * time.Minute
-	// Agent: 单条语句控制在 1MiB 内，低于常见的 max_allowed_packet，超限时拆批。
-	maxSQLPacketBytes = 1 << 20
+	// Agent: 单条语句控制在 4MiB 内（Q24）；启动时对照 @@max_allowed_packet 的 1/4 给出建议。
+	maxSQLPacketBytes = 4 << 20
 )
 
 // MySQLConfig 是进程内的 MySQL 连接参数，不写回磁盘。
@@ -110,7 +110,60 @@ func OpenMySQL(cfg MySQLConfig) (*sql.DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("mysql ping failed: %w", err)
 	}
+	// Agent: 启动只告警，不因包大小建议失败；拆批仍按 maxSQLPacketBytes。
+	checkMySQLMaxAllowedPacket(db)
 	return db, nil
+}
+
+// mysqlPacketAdvice 用服务端 max_allowed_packet 的 1/4 作为应用侧推荐上限。
+// mysqlPacketAdvice recommends app packet cap as one quarter of the server max_allowed_packet.
+func mysqlPacketAdvice(serverPacket, appPacket int64) (recommended int64, mismatch bool) {
+	if serverPacket <= 0 {
+		return 0, false
+	}
+	recommended = serverPacket / 4
+	return recommended, appPacket != recommended
+}
+
+// checkMySQLMaxAllowedPacket 读取服务端 max_allowed_packet，与应用上限比较并打日志。
+// checkMySQLMaxAllowedPacket reads server max_allowed_packet, compares with the app cap, and logs.
+func checkMySQLMaxAllowedPacket(db *sql.DB) {
+	var serverPacket int64
+	if err := db.QueryRow("SELECT @@max_allowed_packet").Scan(&serverPacket); err != nil {
+		log.Printf("[mysql-packet] WARN failed to read @@max_allowed_packet: %v", err)
+		return
+	}
+	recommended, mismatch := mysqlPacketAdvice(serverPacket, int64(maxSQLPacketBytes))
+	log.Printf("[mysql-packet] server max_allowed_packet=%d (%s); app maxSQLPacketBytes=%d (%s); recommended(app)=%d (%s) [= server/4]",
+		serverPacket, formatByteSize(serverPacket),
+		maxSQLPacketBytes, formatByteSize(int64(maxSQLPacketBytes)),
+		recommended, formatByteSize(recommended))
+	if !mismatch {
+		return
+	}
+	log.Printf("========== [MySQL PACKET SIZE WARNING] app maxSQLPacketBytes=%d (%s) is not recommended value %d (%s) (= @@max_allowed_packet/4). Consider changing maxSQLPacketBytes to %d ==========",
+		maxSQLPacketBytes, formatByteSize(int64(maxSQLPacketBytes)),
+		recommended, formatByteSize(recommended),
+		recommended)
+}
+
+func formatByteSize(n int64) string {
+	const (
+		kib = 1024
+		mib = 1024 * kib
+	)
+	switch {
+	case n >= mib && n%mib == 0:
+		return fmt.Sprintf("%dMiB", n/mib)
+	case n >= mib:
+		return fmt.Sprintf("%.2fMiB", float64(n)/float64(mib))
+	case n >= kib && n%kib == 0:
+		return fmt.Sprintf("%dKiB", n/kib)
+	case n >= kib:
+		return fmt.Sprintf("%.2fKiB", float64(n)/float64(kib))
+	default:
+		return fmt.Sprintf("%dB", n)
+	}
 }
 
 // mysqlDSN 组装 DSN。密码里的特殊字符交给驱动转义。
@@ -288,8 +341,28 @@ func mysqlExpectedTables() []mysqlTableSpec {
 			Columns: []mysqlColumnSpec{
 				{"id", "varchar(128)"}, {"run_id", "varchar(128)"}, {"name", "varchar(1024)"},
 				{"url", "longtext"}, {"size", "bigint"}, {"created_at", "datetime"},
+				// Agent: 上云与软删列，与方案 Q1/Q13/Q32 的期望表一致。
+				{"entity", "varchar(512)"}, {"entity_key", "varchar(512)"}, {"local_path", "varchar(2048)"},
+				{"local_uploaded_at", "datetime"}, {"status", "varchar(32)"}, {"storage_type", "varchar(32)"},
+				{"object_key", "varchar(2048)"}, {"cloud_uploaded_at", "datetime"}, {"cloud_etag", "varchar(255)"},
+				{"error_message", "varchar(1024)"}, {"retry_count", "int"}, {"local_deleted_at", "datetime"},
+				{"deleted_at", "datetime"}, {"updated_at", "datetime"},
 			},
-			Indexes: []string{"PRIMARY"},
+			Indexes: []string{"PRIMARY", "idx_files_entity", "idx_files_entity_key", "idx_files_status", "idx_files_deleted_at"},
+		},
+		{
+			// Agent: Artifact 文件单独成表，外键指向 artifacts，不级联删除。
+			Name: "artifact_files",
+			Columns: []mysqlColumnSpec{
+				{"id", "varchar(128)"}, {"run_id", "varchar(128)"}, {"artifact_id", "varchar(128)"},
+				{"name", "varchar(1024)"}, {"url", "longtext"}, {"size", "bigint"}, {"created_at", "datetime"},
+				{"entity", "varchar(512)"}, {"entity_key", "varchar(512)"}, {"local_path", "varchar(2048)"},
+				{"local_uploaded_at", "datetime"}, {"status", "varchar(32)"}, {"storage_type", "varchar(32)"},
+				{"object_key", "varchar(2048)"}, {"cloud_uploaded_at", "datetime"}, {"cloud_etag", "varchar(255)"},
+				{"error_message", "varchar(1024)"}, {"retry_count", "int"}, {"local_deleted_at", "datetime"},
+				{"deleted_at", "datetime"}, {"updated_at", "datetime"},
+			},
+			Indexes: []string{"PRIMARY", "idx_artifact_files_entity", "idx_artifact_files_entity_key", "idx_artifact_files_status", "idx_artifact_files_deleted_at", "idx_artifact_files_artifact_id"},
 		},
 	}
 }

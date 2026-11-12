@@ -34,8 +34,8 @@ func (db *DB) hasDeletedData() bool {
 	return err == nil
 }
 
-// purgeDeletedData removes a batch of data for soft-deleted runs, then
-// hard-deletes the run row once empty. Returns true if more work remains.
+// purgeDeletedData 分批清掉软删 run 的指标和日志。文件行只补软删并入队，等异步硬删后再删 run。
+// purgeDeletedData purges metrics and logs for a soft-deleted run. File rows are only soft-deleted and queued.
 func (db *DB) purgeDeletedData(batchSize int) (bool, error) {
 	// Find one soft-deleted run
 	var runID string
@@ -48,8 +48,8 @@ func (db *DB) purgeDeletedData(batchSize int) (bool, error) {
 		return false, err
 	}
 
-	// Delete data in batches from each table
-	dataTables := []string{"history_scalars", "history_histograms", "run_steps", "run_keys", "system_events", "console_logs", "files", "artifacts"}
+	// Agent: 指标和日志仍直接硬删。文件行里带前缀的要等异步清理。
+	dataTables := []string{"history_scalars", "history_histograms", "run_steps", "run_keys", "system_events", "console_logs"}
 	for _, table := range dataTables {
 		deleted, err := db.deleteBatch(table, "run_id", runID, batchSize)
 		if err != nil {
@@ -57,6 +57,30 @@ func (db *DB) purgeDeletedData(batchSize int) (bool, error) {
 		}
 		if deleted > 0 {
 			return true, nil // more work to do
+		}
+	}
+
+	// Agent: 尚未软删的文件行在这里补软删并入队。files 和 artifact_files 都不在 purge 里硬删。
+	ids, err := db.softDeleteLiveRunFiles(runID)
+	if err != nil {
+		return false, err
+	}
+	db.notifyFileDelete(ids)
+	waiting, err := db.CountAllFileRows(runID)
+	if err != nil {
+		return false, err
+	}
+	if waiting > 0 {
+		return true, nil
+	}
+
+	for _, table := range []string{"artifacts"} {
+		deleted, err := db.deleteBatch(table, "run_id", runID, batchSize)
+		if err != nil {
+			return false, err
+		}
+		if deleted > 0 {
+			return true, nil
 		}
 	}
 
