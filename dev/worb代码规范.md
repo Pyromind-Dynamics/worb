@@ -20,3 +20,13 @@
 启动对内网地址和公网地址分别依次执行这三项。任一地址少一项就不启动。代码不调用 `HeadBucket`、`GetBucketInfo` 和列举对象。
 
 内网使用虚拟主机风格：主机名是 `{bucket}.{object_store_endpoint 的主机}`，路径只有对象键。公网自定义域名保持 `object_store_endpoint_pub` 的主机名，路径也只有对象键。不使用 path style。
+
+## 启动日志
+
+gRPC 启动检查必须打出三种结果之一，并且不包含 wandb key、证书正文、数据库密码和 OSS 密钥。
+
+| 结果 | 日志 | 进程 |
+|---|---|---|
+| 校验通过 | `query_user_by_token startup check passed` | 继续启动 |
+| 没有校验 | `query_user_by_token startup check skipped` | 退出。地址为空、证书不满足，或连接对象没有建成，调用没有发出 |
+| 校验失败 | `query_user_by_token startup check failed` | 退出。拨号失败、超时、传输错误或没有回包 |

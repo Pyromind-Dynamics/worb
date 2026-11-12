@@ -1,11 +1,15 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -352,6 +356,27 @@ func TestProbeUserService(t *testing.T) {
 	}
 	if err := probeUserService(context.Background(), &fakeQuery{}); err == nil {
 		t.Fatal("empty response passed the startup check")
+	}
+}
+
+// TestGRPCStartupCheckLogs 确认通过、没有校验和校验失败都会写日志。
+// TestGRPCStartupCheckLogs checks that pass, skip, and failure each write a log line.
+func TestGRPCStartupCheckLogs(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	if err := probeUserService(context.Background(), &fakeQuery{resp: &userpb.UserInfoResponse{}}); err != nil || !strings.Contains(buf.String(), "startup check passed") {
+		t.Fatalf("passed log %v %q", err, buf.String())
+	}
+	buf.Reset()
+	// Agent: 地址为空时不会发起调用，仍要留下没有校验的日志，并且启动失败。
+	t.Setenv(envAddr, "")
+	if err := OpenFromEnv(); err == nil || !strings.Contains(buf.String(), "startup check skipped") {
+		t.Fatalf("skipped log %v %q", err, buf.String())
+	}
+	buf.Reset()
+	if err := probeUserService(context.Background(), &fakeQuery{err: errors.New("dial")}); err == nil || !strings.Contains(buf.String(), "startup check failed") {
+		t.Fatalf("failed log %v %q", err, buf.String())
 	}
 }
 
