@@ -42,38 +42,57 @@ type presignAPI interface {
 // s3API talks to Alibaba Cloud OSS through its S3-compatible API.
 type s3API struct {
 	bucket string
-	// Agent: 用接口保住 Put、Delete、签名的真实调用，测试可以换成假客户端。
-	client  objectAPI
+	// Agent: client 只连内网地址，负责上传、删除和内网连通检查。
+	client objectAPI
+	// Agent: pub 只连公网地址，启动时检查它，签名也从这条客户端生成。
+	pub     bucketHead
 	presign presignAPI
 }
 
-// NewS3 创建路径风格可选的 S3 客户端。OSS 使用 path style。
-// NewS3 builds an S3 client. OSS turns path style on.
-func NewS3(cfg Config) (*s3API, error) {
-	client := s3.New(s3.Options{
+// newS3Client 按同一个密钥和桶选项连接指定地址。
+// newS3Client connects to one endpoint with the shared credentials and bucket options.
+func newS3Client(cfg Config, endpoint string) *s3.Client {
+	return s3.New(s3.Options{
 		Region:       cfg.Region,
-		BaseEndpoint: aws.String(cfg.Endpoint),
+		BaseEndpoint: aws.String(endpoint),
 		Credentials:  credentials.NewStaticCredentialsProvider(cfg.AccessKey, cfg.SecretKey, cfg.SessionToken),
 		UsePathStyle: cfg.PathStyle,
 	})
-	return &s3API{bucket: cfg.Bucket, client: client, presign: s3.NewPresignClient(client)}, nil
 }
 
-// Ping 确认 endpoint、密钥和 bucket 能访问。失败时进程不能启动。
-// Ping checks that the endpoint, credentials, and bucket are reachable. Failure stops startup.
+// NewS3 创建内网管理客户端和公网签名客户端。OSS 使用 path style。
+// NewS3 builds the internal management client and the public signing client. OSS turns path style on.
+func NewS3(cfg Config) (*s3API, error) {
+	// Agent: 上传和删除走内网地址，不把公网地址用在管理请求上。
+	internal := newS3Client(cfg, cfg.Endpoint)
+	// Agent: 临时下载地址从公网客户端签发，用户浏览器才能打开。
+	public := newS3Client(cfg, cfg.EndpointPub)
+	return &s3API{bucket: cfg.Bucket, client: internal, pub: public, presign: s3.NewPresignClient(public)}, nil
+}
+
+// Ping 分别确认内网地址和公网地址都能访问同一个桶。任一失败则进程不能启动。
+// Ping checks that both the internal and public endpoints can reach the same bucket. Either failure stops startup.
 func (s *s3API) Ping(ctx context.Context) error {
-	// Agent: 限时 30 秒，避免 OSS 无响应时启动一直停住。
-	return headBucket(ctx, s.client, s.bucket)
+	errInternal := headBucket(ctx, s.client, s.bucket, "internal")
+	var errPublic error
+	// Agent: 没有公网客户端时不能签出用户可打开的地址，同样视为没连上。
+	if s.pub == nil {
+		errPublic = errors.New("oss public endpoint is not configured")
+	} else {
+		errPublic = headBucket(ctx, s.pub, s.bucket, "public")
+	}
+	return errors.Join(errInternal, errPublic)
 }
 
-// headBucket 对桶做一次 Head。任何错误都表示没有连上。
-// headBucket issues one Head on the bucket. Any error means it is not reachable.
-func headBucket(ctx context.Context, api bucketHead, bucket string) error {
+// headBucket 对桶做一次 Head。任何错误都表示这个地址没有连上。
+// headBucket issues one Head on the bucket. Any error means this endpoint is not reachable.
+func headBucket(ctx context.Context, api bucketHead, bucket, which string) error {
 	callCtx, cancel := context.WithTimeout(ctx, ossPingTimeout)
 	defer cancel()
 	_, err := api.HeadBucket(callCtx, &s3.HeadBucketInput{Bucket: aws.String(bucket)})
 	if err != nil {
-		return fmt.Errorf("oss unreachable: %w", err)
+		// Agent: 错误里标明是内网还是公网，不写入密钥。
+		return fmt.Errorf("oss %s endpoint unreachable: %w", which, err)
 	}
 	return nil
 }
@@ -123,8 +142,8 @@ func (s *s3API) Delete(ctx context.Context, key string) error {
 	return err
 }
 
-// SignedURL 生成 指定有效期的 GET 地址。
-// SignedURL returns a GET URL that expires after ttl.
+// SignedURL 用公网地址生成指定有效期的 GET 地址。
+// SignedURL returns a GET URL on the public endpoint that expires after ttl.
 func (s *s3API) SignedURL(ctx context.Context, key string, ttl time.Duration) (string, error) {
 	out, err := s.presign.PresignGetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),

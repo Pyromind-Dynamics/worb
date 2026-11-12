@@ -23,8 +23,8 @@ const (
 	mysqlMaxIdleConns    = 8
 	mysqlConnMaxLifetime = 30 * time.Minute
 	mysqlConnMaxIdleTime = 5 * time.Minute
-	// Agent: 单条语句控制在 4MiB 内（Q24）；启动时对照 @@max_allowed_packet 的 1/4 给出建议。
-	maxSQLPacketBytes = 4 << 20
+	// Agent: 预发 @@max_allowed_packet 为 1024MiB，推荐值是它的 1/4，即 256MiB。超限仍拆批。
+	maxSQLPacketBytes = 256 << 20
 )
 
 // MySQLConfig 是进程内的 MySQL 连接参数，不写回磁盘。

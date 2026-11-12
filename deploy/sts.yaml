@@ -85,7 +85,7 @@ spec:
             secretName: worb-secrets
 # Secret worb-secrets 的键要变成这些文件名：
 # db_host db_port db_user db_passwd db_name
-# object_store_endpoint object_store_bucket object_store_access_key object_store_secret_key
+# object_store_endpoint object_store_endpoint_pub object_store_bucket object_store_access_key object_store_secret_key
 # object_store_region 与 object_store_session_token 可省略
 # user_grpc_cert.pem 是校验远程 gRPC 的 CA，不是客户端证书
 # PVC worb-data 挂到 /data，多副本时使用 ReadWriteMany

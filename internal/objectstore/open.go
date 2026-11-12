@@ -20,7 +20,7 @@ func Open(kind, secretDir string) (Client, error) {
 		if err != nil {
 			return nil, err
 		}
-		// Agent: 密钥文件读到不算通过，必须访问到 OSS。
+		// Agent: 内网地址和公网地址都要访问到桶，缺一个就不能启动。
 		if err := client.Ping(context.Background()); err != nil {
 			return nil, err
 		}

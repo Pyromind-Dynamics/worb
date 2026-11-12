@@ -31,6 +31,7 @@ type Client interface {
 // Config holds object storage settings loaded from secret files at startup.
 type Config struct {
 	Endpoint     string
+	EndpointPub  string
 	Region       string
 	Bucket       string
 	AccessKey    string
@@ -57,6 +58,10 @@ func LoadConfig(dir string, pathStyle bool) (Config, error) {
 	if cfg.Endpoint, err = read("object_store_endpoint", true); err != nil {
 		return Config{}, err
 	}
+	// Agent: 公网地址单独存放，只用于生成用户读取文件的临时链接。
+	if cfg.EndpointPub, err = read("object_store_endpoint_pub", true); err != nil {
+		return Config{}, err
+	}
 	if cfg.Region, err = read("object_store_region", false); err != nil {
 		return Config{}, err
 	}
@@ -76,6 +81,8 @@ func LoadConfig(dir string, pathStyle bool) (Config, error) {
 	switch {
 	case cfg.Endpoint == "":
 		return Config{}, errors.New("object_store_endpoint is empty")
+	case cfg.EndpointPub == "":
+		return Config{}, errors.New("object_store_endpoint_pub is empty")
 	case cfg.Bucket == "":
 		return Config{}, errors.New("object_store_bucket is empty")
 	case cfg.AccessKey == "":

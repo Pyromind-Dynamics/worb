@@ -179,13 +179,13 @@ func TestBusyLockCodes(t *testing.T) {
 func TestHistogramPacketSplits(t *testing.T) {
 	prefix := SQLByEngine("mysql", SQLInsertHistsPrefix)
 	row := "(?,?,?,?,?,?)"
-	// Agent: 单行 bins+vals 约 5MiB，超过 4MiB 上限，整批必须拆到 1 行。
-	big := strings.Repeat("1", 2<<20)
-	args := make([]any, 0, 8*6)
-	for i := 0; i < 8; i++ {
-		args = append(args, "run", i, "loss", nil, big, big)
+	// Agent: 单行 bins 超过当前上限，两行一批必须拆到 1 行。
+	big := strings.Repeat("1", maxSQLPacketBytes+1)
+	args := make([]any, 0, 2*6)
+	for i := 0; i < 2; i++ {
+		args = append(args, "run", i, "loss", nil, big, "x")
 	}
-	n := 8
+	n := 2
 	for n > 1 && estimateInsert(prefix, row, n, args[:n*6]) > maxSQLPacketBytes {
 		n /= 2
 	}
