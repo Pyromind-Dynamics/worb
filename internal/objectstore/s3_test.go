@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -134,5 +135,69 @@ func TestSignedURLReturnsGetAddress(t *testing.T) {
 	fake.err = errors.New("sign")
 	if _, err := api.SignedURL(context.Background(), "k", time.Minute); err == nil {
 		t.Fatal("sign error was ignored")
+	}
+}
+
+type captureHTTP struct {
+	url *url.URL
+}
+
+func (c *captureHTTP) Do(r *http.Request) (*http.Response, error) {
+	copied := *r.URL
+	c.url = &copied
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader("")),
+		Header:     make(http.Header),
+		Request:    r,
+	}, nil
+}
+
+// TestOSSAddressStyle 确认内网使用虚拟主机风格，公网自定义域名保持配置的主机名。
+// TestOSSAddressStyle checks virtual hosted style on the internal endpoint and an unchanged host on the public custom domain.
+func TestOSSAddressStyle(t *testing.T) {
+	cfg := Config{
+		Endpoint:    "https://oss-cn-shanghai-internal.aliyuncs.com",
+		EndpointPub: "http://worb-oss-cn-east-1.pyromind-asia.cn",
+		Region:      "cn-shanghai",
+		Bucket:      "aliyun-huosi-worb-data-v1",
+		AccessKey:   "ak",
+		SecretKey:   "sk",
+	}
+	internal := &captureHTTP{}
+	opts, err := s3ClientOptions(cfg, cfg.Endpoint, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts.HTTPClient = internal
+	_, err = s3.New(opts).PutObject(context.Background(), &s3.PutObjectInput{
+		Bucket: aws.String(cfg.Bucket),
+		Key:    aws.String("worb-startup-probe/abc"),
+		Body:   strings.NewReader("worb-startup"),
+	})
+	if err != nil || internal.url == nil || internal.url.Scheme != "https" || internal.url.Host != "aliyun-huosi-worb-data-v1.oss-cn-shanghai-internal.aliyuncs.com" || internal.url.Path != "/worb-startup-probe/abc" {
+		t.Fatalf("internal %v %v", err, internal.url)
+	}
+	public := &captureHTTP{}
+	opts, err = s3ClientOptions(cfg, cfg.EndpointPub, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts.HTTPClient = public
+	client := s3.New(opts)
+	_, err = client.PutObject(context.Background(), &s3.PutObjectInput{
+		Bucket: aws.String(cfg.Bucket),
+		Key:    aws.String("worb-startup-probe/abc"),
+		Body:   strings.NewReader("worb-startup"),
+	})
+	if err != nil || public.url == nil || public.url.Scheme != "http" || public.url.Host != "worb-oss-cn-east-1.pyromind-asia.cn" || public.url.Path != "/worb-startup-probe/abc" {
+		t.Fatalf("public %v %v", err, public.url)
+	}
+	signed, err := s3.NewPresignClient(client).PresignGetObject(context.Background(), &s3.GetObjectInput{
+		Bucket: aws.String(cfg.Bucket),
+		Key:    aws.String("worb-startup-probe/abc"),
+	}, s3.WithPresignExpires(time.Hour))
+	if err != nil || !strings.HasPrefix(signed.URL, "http://worb-oss-cn-east-1.pyromind-asia.cn/worb-startup-probe/abc?") {
+		t.Fatalf("signed %v %v", err, signed)
 	}
 }

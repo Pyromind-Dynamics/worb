@@ -37,12 +37,11 @@ type Config struct {
 	AccessKey    string
 	SecretKey    string
 	SessionToken string
-	PathStyle    bool
 }
 
 // LoadConfig 读取 /etc/secrets 下的 object_store_* 文件。缺文件则失败。
 // LoadConfig reads object_store_* files under /etc/secrets. A missing file is an error.
-func LoadConfig(dir string, pathStyle bool) (Config, error) {
+func LoadConfig(dir string) (Config, error) {
 	read := func(name string, required bool) (string, error) {
 		b, err := os.ReadFile(dir + "/" + name)
 		if err != nil {
@@ -53,12 +52,12 @@ func LoadConfig(dir string, pathStyle bool) (Config, error) {
 		}
 		return strings.TrimSpace(string(b)), nil
 	}
-	cfg := Config{PathStyle: pathStyle}
+	cfg := Config{}
 	var err error
 	if cfg.Endpoint, err = read("object_store_endpoint", true); err != nil {
 		return Config{}, err
 	}
-	// Agent: 公网地址单独存放，只用于生成用户读取文件的临时链接。
+	// Agent: 公网地址单独存放。它是绑定到桶上的自定义域名，启动检查和临时下载地址都用它。
 	if cfg.EndpointPub, err = read("object_store_endpoint_pub", true); err != nil {
 		return Config{}, err
 	}

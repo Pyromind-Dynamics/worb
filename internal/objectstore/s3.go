@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +18,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go"
+	"github.com/aws/smithy-go/middleware"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
 const (
@@ -50,24 +53,87 @@ type s3API struct {
 	presign presignAPI
 }
 
-// newS3Client 按同一个密钥和桶选项连接指定地址。
-// newS3Client connects to one endpoint with the shared credentials and bucket options.
-func newS3Client(cfg Config, endpoint string) *s3.Client {
-	return s3.New(s3.Options{
+// newS3Client 按同一个密钥和桶选项连接指定地址。内网使用虚拟主机风格。
+// newS3Client connects to one endpoint with the shared credentials and bucket options. The internal endpoint uses virtual hosted style.
+func newS3Client(cfg Config, endpoint string, customDomain bool) (*s3.Client, error) {
+	opts, err := s3ClientOptions(cfg, endpoint, customDomain)
+	if err != nil {
+		return nil, err
+	}
+	return s3.New(opts), nil
+}
+
+// s3ClientOptions 组装 S3 客户端选项。customDomain 为真时，签名前恢复自定义域名的主机名。
+// s3ClientOptions builds S3 client options. When customDomain is set, signing restores the custom-domain host.
+func s3ClientOptions(cfg Config, endpoint string, customDomain bool) (s3.Options, error) {
+	opts := s3.Options{
 		Region:       cfg.Region,
 		BaseEndpoint: aws.String(endpoint),
 		Credentials:  credentials.NewStaticCredentialsProvider(cfg.AccessKey, cfg.SecretKey, cfg.SessionToken),
-		UsePathStyle: cfg.PathStyle,
-	})
+		// Agent: 阿里云拒绝 path style。虚拟主机风格把桶名放在主机名前面。
+		UsePathStyle: false,
+	}
+	if !customDomain {
+		return opts, nil
+	}
+	host, err := configuredHost(endpoint)
+	if err != nil {
+		return s3.Options{}, err
+	}
+	// Agent: 公网自定义域名已经绑定到桶，签名前把主机名改回配置值。
+	opts.APIOptions = append(opts.APIOptions, keepCustomDomainHost(host))
+	return opts, nil
 }
 
-// NewS3 创建内网管理客户端和公网签名客户端。OSS 使用 path style。
-// NewS3 builds the internal management client and the public signing client. OSS turns path style on.
+// configuredHost 取出 endpoint 的主机名，含端口。没有协议或主机名则失败。
+// configuredHost returns the endpoint host, including a port. A missing scheme or host is an error.
+func configuredHost(endpoint string) (string, error) {
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "", fmt.Errorf("object store endpoint %q is not a valid URI", endpoint)
+	}
+	return u.Host, nil
+}
+
+// customDomainHost 在签名前把请求主机改回自定义域名。
+// customDomainHost restores the custom-domain host before the request is signed.
+type customDomainHost struct {
+	host string
+}
+
+func (*customDomainHost) ID() string { return "ossCustomDomainHost" }
+
+func (m *customDomainHost) HandleFinalize(ctx context.Context, in middleware.FinalizeInput, next middleware.FinalizeHandler) (middleware.FinalizeOutput, middleware.Metadata, error) {
+	req, ok := in.Request.(*smithyhttp.Request)
+	if ok {
+		// Agent: 路径仍是对象键。只改主机名，避免变成桶名加在自定义域名前面。
+		req.URL.Host = m.host
+		req.Host = m.host
+	}
+	return next.HandleFinalize(ctx, in)
+}
+
+// keepCustomDomainHost 把主机名还原插到地址解析之后、签名之前。
+// keepCustomDomainHost inserts host restoration after endpoint resolution and before signing.
+func keepCustomDomainHost(host string) func(*middleware.Stack) error {
+	return func(stack *middleware.Stack) error {
+		return stack.Finalize.Insert(&customDomainHost{host: host}, "ResolveEndpointV2", middleware.After)
+	}
+}
+
+// NewS3 创建内网管理客户端和公网签名客户端。内网用虚拟主机风格，公网保持自定义域名。
+// NewS3 builds the internal management client and the public signing client. Internal uses virtual hosted style, and the public client keeps its custom domain.
 func NewS3(cfg Config) (*s3API, error) {
-	// Agent: 业务上传和删除走内网地址。公网地址只用于签名和启动检查。
-	internal := newS3Client(cfg, cfg.Endpoint)
+	// Agent: 业务上传和删除走内网地址，主机名是桶名加内网 Endpoint。
+	internal, err := newS3Client(cfg, cfg.Endpoint, false)
+	if err != nil {
+		return nil, err
+	}
 	// Agent: 同一个公网客户端既签发临时下载地址，也在启动时做公网三项检查。
-	public := newS3Client(cfg, cfg.EndpointPub)
+	public, err := newS3Client(cfg, cfg.EndpointPub, true)
+	if err != nil {
+		return nil, err
+	}
 	return &s3API{bucket: cfg.Bucket, client: internal, public: public, presign: s3.NewPresignClient(public)}, nil
 }
 
