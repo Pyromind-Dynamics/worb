@@ -18,3 +18,5 @@
 | `DeleteObject` | 删除对象，以及启动时删除探测对象 | `oss:DeleteObject` |
 
 启动对内网地址和公网地址分别依次执行这三项。任一地址少一项就不启动。代码不调用 `HeadBucket`、`GetBucketInfo` 和列举对象。
+
+内网使用虚拟主机风格：主机名是 `{bucket}.{object_store_endpoint 的主机}`，路径只有对象键。公网自定义域名保持 `object_store_endpoint_pub` 的主机名，路径也只有对象键。不使用 path style。

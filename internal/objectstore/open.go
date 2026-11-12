@@ -12,7 +12,7 @@ func Open(kind, secretDir string) (Client, error) {
 	case "", "off":
 		return nil, nil
 	case "oss":
-		cfg, err := LoadConfig(secretDir, true)
+		cfg, err := LoadConfig(secretDir)
 		if err != nil {
 			return nil, fmt.Errorf("oss config: %w", err)
 		}
