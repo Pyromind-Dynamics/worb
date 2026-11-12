@@ -98,11 +98,15 @@ type userClient struct {
 func OpenFromEnv() error {
 	cfg, err := loadUserGRPCConfig(os.Getenv)
 	if err != nil {
+		// Agent: 地址或证书不满足时没有发起调用，单独记下没有校验。
+		log.Printf("query_user_by_token startup check skipped: %v", err)
 		return err
 	}
 	// Agent: 启动时建一条连接，之后的请求复用它。
 	conn, err := grpc.NewClient(cfg.addr, grpc.WithTransportCredentials(cfg.creds))
 	if err != nil {
+		// Agent: 连接对象没有建成，调用没有发出，也记为没有校验。
+		log.Printf("query_user_by_token startup check skipped: %v", err)
 		return err
 	}
 	rpc := userpb.NewUserClusterServiceClient(conn)
@@ -138,6 +142,8 @@ func probeUserService(ctx context.Context, rpc queryAPI) error {
 		log.Printf("query_user_by_token startup check failed code=%s err=%v", status.Code(err), err)
 		return fmt.Errorf("USER_GRPC_ADDR is unreachable: %w", err)
 	}
+	// Agent: 有回包即通过。日志不带 wandb key，这次调用本来也没有 key。
+	log.Printf("query_user_by_token startup check passed")
 	return nil
 }
 
