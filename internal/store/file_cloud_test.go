@@ -69,3 +69,28 @@ func TestPendingFileHiddenAfterSoftDelete(t *testing.T) {
 		t.Fatalf("stored %+v %v", file, err)
 	}
 }
+
+func TestSoftDeleteStoredFilesByID(t *testing.T) {
+	db := setupTestDB(t)
+	if _, err := db.EnsureProject("local", "files"); err != nil {
+		t.Fatal(err)
+	}
+	run, err := db.UpsertRun(UpsertRunParams{Entity: "local", Project: "files", Name: "r2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := "run-9"
+	if err := db.InsertPendingRunFile(id, run.ID, "test.csv", "/files/upload/"+id, "local"); err != nil {
+		t.Fatal(err)
+	}
+	var queued []string
+	db.SetFileDeleteNotify(func(ids []string) { queued = append(queued, ids...) })
+	changed, err := db.SoftDeleteStoredFiles([]string{id, "run-missing"})
+	if err != nil || len(changed) != 1 || changed[0] != id || len(queued) != 1 {
+		t.Fatalf("changed %v queued %v err %v", changed, queued, err)
+	}
+	listed, err := db.ListVisibleRunFiles(run.ID)
+	if err != nil || len(listed) != 0 {
+		t.Fatalf("visible %+v %v", listed, err)
+	}
+}

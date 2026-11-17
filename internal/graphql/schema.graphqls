@@ -33,6 +33,16 @@ type Mutation {
   createArtifactManifest(input: CreateArtifactManifestInput!): CreateArtifactManifestPayload
   createArtifactFiles(input: CreateArtifactFilesInput!): CreateArtifactFilesPayload
   createRunFiles(input: CreateRunFilesInput!): CreateRunFilesPayload
+  deleteFiles(input: DeleteFilesInput!): DeleteFilesPayload
+}
+
+input DeleteFilesInput {
+  files: [ID!]!
+  projectId: Int
+}
+
+type DeleteFilesPayload {
+  success: Boolean
 }
 
 scalar JSONString
@@ -201,7 +211,9 @@ type Run {
   historyKeys: JSONString
   user: RunUser
   wandbConfig(keys: [String!]): JSONString
-  files: FileReadConnection
+  projectId: Int
+  fileCount: Int
+  files(names: [String!], after: String, first: Int = 50, pattern: String): FileReadConnection
 }
 
 input CreateArtifactInput {
@@ -235,17 +247,23 @@ type Artifact {
 
 type FileReadConnection {
   edges: [FileReadEdge!]!
+  pageInfo: PageInfo!
 }
 
 type FileReadEdge {
   node: FileRead!
+  cursor: String!
 }
 
 type FileRead {
   id: String!
   name: String!
-  url: String
+  url(upload: Boolean): String
   directUrl: String
+  sizeBytes: Int
+  mimetype: String
+  updatedAt: String
+  md5: String
 }
 
 type ArtifactManifest {

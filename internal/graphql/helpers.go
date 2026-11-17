@@ -123,6 +123,9 @@ func storeRunToGQL(r *store.Run) *Run {
 	readOnly := false
 	gqlRun.ReadOnly = &readOnly
 	gqlRun.User = &RunUser{}
+	// Agent: wandb 加载 run 时要求 projectId 是整数。项目主键是字符串，这里固定为 0。删除文件不使用这个值。
+	projectID := 0
+	gqlRun.ProjectID = &projectID
 
 	return gqlRun
 }

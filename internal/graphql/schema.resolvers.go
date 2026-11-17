@@ -9,7 +9,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"regexp"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/sarna/worb/internal/auth"
@@ -21,13 +24,25 @@ import (
 func (r *artifactResolver) Files(ctx context.Context, obj *Artifact) (*FileReadConnection, error) {
 	// Agent: 创建时的 manifest directUrl 不走这里，仍是 PUT 地址。
 	if obj == nil || obj.ID == "" {
-		return &FileReadConnection{Edges: []*FileReadEdge{}}, nil
+		return emptyFileRead(), nil
 	}
 	files, err := r.Store.ListVisibleArtifactFiles(obj.ID)
 	if err != nil {
 		return nil, err
 	}
 	return r.readFiles(ctx, files), nil
+}
+
+// URL 返回文件的 upload 路径。upload 参数不改变这个地址。
+// URL returns the file upload path. The upload argument does not change that address.
+func (r *fileReadResolver) URL(ctx context.Context, obj *FileRead, upload *bool) (*string, error) {
+	// Agent: wandb 查询会带 upload。地址始终是 /files/upload/{id}，不改成云端地址。
+	_ = ctx
+	_ = upload
+	if obj == nil {
+		return nil, nil
+	}
+	return obj.URL, nil
 }
 
 // UpsertBucket 创建或更新 run，项目归属使用本次请求的 user_id。
@@ -394,6 +409,37 @@ func (r *mutationResolver) CreateRunFiles(ctx context.Context, input CreateRunFi
 	}, nil
 }
 
+// DeleteFiles 按文件 id 软删，并送进已有的删除队列。
+// DeleteFiles soft-deletes files by id and sends them to the existing delete queue.
+func (r *mutationResolver) DeleteFiles(ctx context.Context, input DeleteFilesInput) (*DeleteFilesPayload, error) {
+	// Agent: 客户端传来的 projectId 是整数。项目主键是字符串，删除只按文件 id。
+	_ = input.ProjectID
+	entity := auth.EntityFromContext(ctx)
+	ids := make([]string, 0, len(input.Files))
+	for _, id := range input.Files {
+		file, err := r.Store.GetStoredFile(id)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				continue
+			}
+			return nil, err
+		}
+		if file.DeletedAt != "" {
+			continue
+		}
+		// Agent: 行上写了别的用户时不删。空 entity 的旧行仍允许这次请求删除。
+		if file.Entity != "" && file.Entity != entity {
+			return nil, fmt.Errorf("file %s is not owned by this user", id)
+		}
+		ids = append(ids, id)
+	}
+	if _, err := r.Store.SoftDeleteStoredFiles(ids); err != nil {
+		return nil, err
+	}
+	ok := true
+	return &DeleteFilesPayload{Success: &ok}, nil
+}
+
 // RunCount is the resolver for the runCount field.
 func (r *projectResolver) RunCount(ctx context.Context, obj *Project, filters *string) (*int, error) {
 	var displayName string
@@ -612,17 +658,73 @@ func (r *runResolver) WandbConfig(ctx context.Context, obj *Run, keys []string) 
 	return &s, nil
 }
 
-// Files 返回 run 尚未软删的文件。url 固定为 upload 路径，directUrl 在有 object_key 时现签。
-// Files returns run files that are not soft-deleted. url stays the upload path, and directUrl is signed when an object key exists.
-func (r *runResolver) Files(ctx context.Context, obj *Run) (*FileReadConnection, error) {
+// FileCount 返回这个 run 尚未软删的文件数。
+// FileCount returns how many files on this run are not soft-deleted.
+func (r *runResolver) FileCount(ctx context.Context, obj *Run) (*int, error) {
+	// Agent: wandb 用这个数作为文件列表长度。只数尚未软删的 run 文件。
+	_ = ctx
 	if obj == nil || obj.ID == "" {
-		return &FileReadConnection{Edges: []*FileReadEdge{}}, nil
+		zero := 0
+		return &zero, nil
 	}
 	files, err := r.Store.ListVisibleRunFiles(obj.ID)
 	if err != nil {
 		return nil, err
 	}
-	return r.readFiles(ctx, files), nil
+	n := len(files)
+	return &n, nil
+}
+
+// Files 返回 run 尚未软删的文件。url 固定为 upload 路径，directUrl 在有 object_key 时现签。
+// Files returns run files that are not soft-deleted. url stays the upload path, and directUrl is signed when an object key exists.
+func (r *runResolver) Files(ctx context.Context, obj *Run, names []string, after *string, first *int, pattern *string) (*FileReadConnection, error) {
+	if obj == nil || obj.ID == "" {
+		return emptyFileRead(), nil
+	}
+	files, err := r.Store.ListVisibleRunFiles(obj.ID)
+	if err != nil {
+		return nil, err
+	}
+	matched := make([]store.VisibleFile, 0, len(files))
+	for _, file := range files {
+		if fileNameSelected(file.Name, names, pattern) {
+			matched = append(matched, file)
+		}
+	}
+	page, more := pageVisibleFiles(matched, after, first)
+	conn := r.readFiles(ctx, page)
+	// Agent: 超过 first 的剩余文件用 hasNextPage 告诉客户端继续翻页。
+	conn.PageInfo.HasNextPage = more
+	return conn, nil
+}
+
+// Artifact returns ArtifactResolver implementation.
+func (r *Resolver) Artifact() ArtifactResolver { return &artifactResolver{r} }
+
+// FileRead returns FileReadResolver implementation.
+func (r *Resolver) FileRead() FileReadResolver { return &fileReadResolver{r} }
+
+// Mutation returns MutationResolver implementation.
+func (r *Resolver) Mutation() MutationResolver { return &mutationResolver{r} }
+
+// Project returns ProjectResolver implementation.
+func (r *Resolver) Project() ProjectResolver { return &projectResolver{r} }
+
+// Query returns QueryResolver implementation.
+func (r *Resolver) Query() QueryResolver { return &queryResolver{r} }
+
+// Run returns RunResolver implementation.
+func (r *Resolver) Run() RunResolver { return &runResolver{r} }
+
+type artifactResolver struct{ *Resolver }
+type fileReadResolver struct{ *Resolver }
+type mutationResolver struct{ *Resolver }
+type projectResolver struct{ *Resolver }
+type queryResolver struct{ *Resolver }
+type runResolver struct{ *Resolver }
+
+func emptyFileRead() *FileReadConnection {
+	return &FileReadConnection{Edges: []*FileReadEdge{}, PageInfo: &PageInfo{HasNextPage: false}}
 }
 
 // readFiles 把库里的文件行转成查询结果。签名失败时 directUrl 仍用 upload 路径。
@@ -646,28 +748,67 @@ func (r *Resolver) readFiles(ctx context.Context, files []store.VisibleFile) *Fi
 			Name:      f.Name,
 			URL:       &urlCopy,
 			DirectURL: &directCopy,
-		}})
+		}, Cursor: f.ID})
 	}
-	return &FileReadConnection{Edges: edges}
+	return &FileReadConnection{Edges: edges, PageInfo: &PageInfo{HasNextPage: false}}
 }
 
-// Artifact returns ArtifactResolver implementation.
-func (r *Resolver) Artifact() ArtifactResolver { return &artifactResolver{r} }
+// fileNameSelected 按 wandb 的 names 和 SQL LIKE pattern 过滤文件名。
+// fileNameSelected filters a file name with wandb's names list and SQL LIKE pattern.
+func fileNameSelected(name string, names []string, pattern *string) bool {
+	if len(names) > 0 {
+		found := false
+		for _, item := range names {
+			if item == name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	if pattern == nil || *pattern == "" {
+		return true
+	}
+	return sqlLike(name, *pattern)
+}
 
-// Mutation returns MutationResolver implementation.
-func (r *Resolver) Mutation() MutationResolver { return &mutationResolver{r} }
+func sqlLike(value, pattern string) bool {
+	var b strings.Builder
+	b.WriteByte('^')
+	for _, r := range pattern {
+		switch r {
+		case '%':
+			b.WriteString(".*")
+		case '_':
+			b.WriteByte('.')
+		default:
+			b.WriteString(regexp.QuoteMeta(string(r)))
+		}
+	}
+	b.WriteByte('$')
+	ok, err := regexp.MatchString(b.String(), value)
+	return err == nil && ok
+}
 
-// Project returns ProjectResolver implementation.
-func (r *Resolver) Project() ProjectResolver { return &projectResolver{r} }
-
-// Query returns QueryResolver implementation.
-func (r *Resolver) Query() QueryResolver { return &queryResolver{r} }
-
-// Run returns RunResolver implementation.
-func (r *Resolver) Run() RunResolver { return &runResolver{r} }
-
-type artifactResolver struct{ *Resolver }
-type mutationResolver struct{ *Resolver }
-type projectResolver struct{ *Resolver }
-type queryResolver struct{ *Resolver }
-type runResolver struct{ *Resolver }
+// pageVisibleFiles 按游标和 first 截取一页。游标是文件 id。
+// pageVisibleFiles returns one page after the file-id cursor and limited by first.
+func pageVisibleFiles(files []store.VisibleFile, after *string, first *int) ([]store.VisibleFile, bool) {
+	start := 0
+	if after != nil && *after != "" {
+		start = len(files)
+		for i, file := range files {
+			if file.ID == *after {
+				start = i + 1
+				break
+			}
+		}
+	}
+	rest := files[start:]
+	limit := len(rest)
+	if first != nil && *first >= 0 && *first < limit {
+		limit = *first
+	}
+	return rest[:limit], limit < len(rest)
+}

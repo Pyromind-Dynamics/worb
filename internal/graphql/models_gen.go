@@ -106,6 +106,15 @@ type CreateRunFilesPayload struct {
 	UploadHeaders []string          `json:"uploadHeaders,omitempty"`
 }
 
+type DeleteFilesInput struct {
+	Files     []string `json:"files"`
+	ProjectID *int     `json:"projectId,omitempty"`
+}
+
+type DeleteFilesPayload struct {
+	Success *bool `json:"success,omitempty"`
+}
+
 type Entity struct {
 	ID           string        `json:"id"`
 	Name         string        `json:"name"`
@@ -135,14 +144,20 @@ type FileRead struct {
 	Name      string  `json:"name"`
 	URL       *string `json:"url,omitempty"`
 	DirectURL *string `json:"directUrl,omitempty"`
+	SizeBytes *int    `json:"sizeBytes,omitempty"`
+	Mimetype  *string `json:"mimetype,omitempty"`
+	UpdatedAt *string `json:"updatedAt,omitempty"`
+	Md5       *string `json:"md5,omitempty"`
 }
 
 type FileReadConnection struct {
-	Edges []*FileReadEdge `json:"edges"`
+	Edges    []*FileReadEdge `json:"edges"`
+	PageInfo *PageInfo       `json:"pageInfo"`
 }
 
 type FileReadEdge struct {
-	Node *FileRead `json:"node"`
+	Node   *FileRead `json:"node"`
+	Cursor string    `json:"cursor"`
 }
 
 type FileUploadInfo struct {
@@ -212,6 +227,8 @@ type Run struct {
 	HistoryKeys      *string             `json:"historyKeys,omitempty"`
 	User             *RunUser            `json:"user,omitempty"`
 	WandbConfig      *string             `json:"wandbConfig,omitempty"`
+	ProjectID        *int                `json:"projectId,omitempty"`
+	FileCount        *int                `json:"fileCount,omitempty"`
 	Files            *FileReadConnection `json:"files,omitempty"`
 }
 

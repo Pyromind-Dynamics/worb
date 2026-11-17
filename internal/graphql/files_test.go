@@ -32,4 +32,28 @@ func TestReadFilesSignsExistingObject(t *testing.T) {
 	if plain.URL == nil || plain.DirectURL == nil || *plain.URL != "/files/upload/run-2" || *plain.DirectURL != *plain.URL {
 		t.Fatalf("plain %+v", plain)
 	}
+	if conn.PageInfo == nil || conn.PageInfo.HasNextPage || conn.Edges[0].Cursor != "run-1" {
+		t.Fatalf("page %+v", conn.PageInfo)
+	}
+}
+
+func TestFilePageAndNameFilter(t *testing.T) {
+	pattern := "%.csv"
+	if !fileNameSelected("test.csv", nil, &pattern) || fileNameSelected("a.log", nil, &pattern) {
+		t.Fatal("like")
+	}
+	if !fileNameSelected("test.csv", []string{"test.csv"}, nil) || fileNameSelected("a.log", []string{"test.csv"}, nil) {
+		t.Fatal("names")
+	}
+	files := []store.VisibleFile{{ID: "run-1", Name: "a"}, {ID: "run-2", Name: "b"}, {ID: "run-3", Name: "c"}}
+	first := 1
+	page, more := pageVisibleFiles(files, nil, &first)
+	if len(page) != 1 || page[0].ID != "run-1" || !more {
+		t.Fatalf("first page %+v %v", page, more)
+	}
+	after := "run-1"
+	page, more = pageVisibleFiles(files, &after, &first)
+	if len(page) != 1 || page[0].ID != "run-2" || !more {
+		t.Fatalf("next page %+v %v", page, more)
+	}
 }
