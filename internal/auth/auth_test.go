@@ -288,44 +288,53 @@ func TestUserIDFromResponse(t *testing.T) {
 		t.Fatalf("id %q status %d", id, status)
 	}
 
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 	_, status = userIDFromResponse(&userpb.UserInfoResponse{}, "secret")
-	if status != 500 {
-		t.Fatalf("missing base status %d", status)
+	if status != 500 || !strings.Contains(buf.String(), "reason=missing base") || strings.Contains(buf.String(), "secret") {
+		t.Fatalf("missing base status %d log %q", status, buf.String())
 	}
+	buf.Reset()
 	_, status = userIDFromResponse(&userpb.UserInfoResponse{
-		Base: &userpb.GrpcResponse{Success: false, ErrorCode: 7, Message: "no secret here"},
+		Base:      &userpb.GrpcResponse{Success: false, ErrorCode: 500, Message: "worb_sk"},
+		TokenType: "other",
 	}, "secret")
-	if status != 500 {
-		t.Fatalf("success false status %d", status)
+	if status != 500 || !strings.Contains(buf.String(), "reason=base.success=false") || !strings.Contains(buf.String(), "request_token_type=worb_sk") || !strings.Contains(buf.String(), `message="worb_sk"`) || !strings.Contains(buf.String(), `response_token_type="other"`) || !strings.Contains(buf.String(), "user_cluster_info=missing") || !strings.Contains(buf.String(), "http=500") || strings.Contains(buf.String(), "secret") {
+		t.Fatalf("success false status %d log %q", status, buf.String())
 	}
-
+	buf.Reset()
 	bad := okResponse(10000003)
 	bad.UserClusterInfo = nil
 	_, status = userIDFromResponse(bad, "secret")
-	if status != 401 {
-		t.Fatalf("empty info status %d", status)
+	if status != 401 || !strings.Contains(buf.String(), "missing user_cluster_info") || strings.Contains(buf.String(), "secret") {
+		t.Fatalf("empty info status %d log %q", status, buf.String())
 	}
+	buf.Reset()
 	bad = okResponse(10000003)
 	bad.TokenType = "other"
 	_, status = userIDFromResponse(bad, "secret")
-	if status != 401 {
-		t.Fatalf("token type status %d", status)
+	if status != 401 || !strings.Contains(buf.String(), `token_type="other"`) {
+		t.Fatalf("token type status %d log %q", status, buf.String())
 	}
+	buf.Reset()
 	bad = okResponse(10000003)
 	bad.UserClusterInfo.Status = "disabled"
 	_, status = userIDFromResponse(bad, "secret")
-	if status != 401 {
-		t.Fatalf("status field %d", status)
+	if status != 401 || !strings.Contains(buf.String(), `status="disabled"`) {
+		t.Fatalf("status field %d log %q", status, buf.String())
 	}
+	buf.Reset()
 	bad = okResponse(0)
 	_, status = userIDFromResponse(bad, "secret")
-	if status != 401 {
-		t.Fatalf("zero id status %d", status)
+	if status != 401 || !strings.Contains(buf.String(), "id=0") {
+		t.Fatalf("zero id status %d log %q", status, buf.String())
 	}
+	buf.Reset()
 	bad = okResponse(-1)
 	_, status = userIDFromResponse(bad, "secret")
-	if status != 401 {
-		t.Fatalf("negative id status %d", status)
+	if status != 401 || !strings.Contains(buf.String(), "id=-1") {
+		t.Fatalf("negative id status %d log %q", status, buf.String())
 	}
 }
 

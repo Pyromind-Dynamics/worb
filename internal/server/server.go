@@ -22,6 +22,7 @@ import (
 	"github.com/sarna/worb/internal/filestore"
 	"github.com/sarna/worb/internal/filestream"
 	"github.com/sarna/worb/internal/graphql"
+	"github.com/sarna/worb/internal/logerr"
 	"github.com/sarna/worb/internal/objectstore"
 	"github.com/sarna/worb/internal/store"
 	"github.com/sarna/worb/ui"
@@ -97,7 +98,7 @@ func (s *Server) setupRoutes() {
 	gqlSrv := handler.NewDefaultServer(graphql.NewExecutableSchema(graphql.Config{Resolvers: gqlResolver}))
 	gqlSrv.SetErrorPresenter(func(ctx context.Context, err error) *gqlerror.Error {
 		gqlErr := gqlgraphql.DefaultErrorPresenter(ctx, err)
-		log.Printf("GraphQL error: %s (path: %v, extensions: %v)", gqlErr.Message, gqlErr.Path, gqlErr.Extensions)
+		logerr.Errorf("GraphQL error: %s (path: %v, extensions: %v)", gqlErr.Message, gqlErr.Path, gqlErr.Extensions)
 		return gqlErr
 	})
 
@@ -180,7 +181,7 @@ func (s *Server) Run() error {
 // logStartup logs the failed startup check and its cause, then returns that error.
 func logStartup(step string, err error) error {
 	// Agent: 这些错误只含检查项和原因，不含数据库密码、OSS 密钥、wandb key 或证书正文。
-	log.Printf("startup failed: %s: %v", step, err)
+	logerr.Errorf("startup failed: %s: %v", step, err)
 	return fmt.Errorf("%s: %w", step, err)
 }
 
