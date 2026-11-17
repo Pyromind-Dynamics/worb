@@ -457,6 +457,31 @@ func (db *DB) softDeleteIDs(ids []string, artifact bool) ([]string, error) {
 	return changed, nil
 }
 
+// SoftDeleteStoredFiles 按 id 软删仍可见的文件行，并把真正更新到的 id 送进删除队列。
+// SoftDeleteStoredFiles soft-deletes live rows by id and sends the changed ids to the delete queue.
+func (db *DB) SoftDeleteStoredFiles(ids []string) ([]string, error) {
+	var runIDs, artIDs []string
+	for _, id := range ids {
+		// Agent: art- 前缀进 artifact_files，其余进 files。已经软删的行更新不到，不会再次入队。
+		if FileKindOf(id) == FileKindArtifact {
+			artIDs = append(artIDs, id)
+			continue
+		}
+		runIDs = append(runIDs, id)
+	}
+	changed, err := db.softDeleteIDs(runIDs, false)
+	if err != nil {
+		return nil, err
+	}
+	artChanged, err := db.softDeleteIDs(artIDs, true)
+	if err != nil {
+		return nil, err
+	}
+	changed = append(changed, artChanged...)
+	db.notifyFileDelete(changed)
+	return changed, nil
+}
+
 // CountAllFileRows 返回这个 run 在两张文件表里还没被异步硬删的行数。
 // CountAllFileRows counts file rows for a run that the async deleter has not removed yet.
 func (db *DB) CountAllFileRows(runID string) (int, error) {

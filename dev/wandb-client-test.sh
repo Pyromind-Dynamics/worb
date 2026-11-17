@@ -89,9 +89,14 @@ def csv_paths():
 
 
 def graphql(api, query, variables):
+    from wandb_gql import gql
+
     client = getattr(api, "client", None)
     if client is None or not hasattr(client, "execute"):
         raise RuntimeError("wandb.Api 没有 graphql client")
+    # wandb 的 execute 只接受语法树。传入字符串会在客户端报 Invalid AST Node，请求到不了服务端。
+    if isinstance(query, str):
+        query = gql(query)
     payload = client.execute(query, variable_values=variables)
     if isinstance(payload, dict) and "project" not in payload and isinstance(payload.get("data"), dict):
         return payload["data"]
