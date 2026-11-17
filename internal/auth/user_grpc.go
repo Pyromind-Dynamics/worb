@@ -27,9 +27,8 @@ const (
 
 	defaultCacheTTL = 30 * time.Minute
 	rpcTimeout      = 30 * time.Second
-	// Agent: 请求里的 token_type 固定为 worb_sk。
+	// Agent: 请求和成功回包的 token_type 都是 worb_sk。用户服务原样回传请求类型。
 	tokenTypeRequest = "worb_sk"
-	tokenTypeWorb    = "worb"
 	statusNormal     = "normal"
 )
 
@@ -242,8 +241,8 @@ func userIDFromResponse(resp *userpb.UserInfoResponse, token string) (string, in
 		return "", 500
 	}
 	info := resp.GetUserClusterInfo()
-	// Agent: success 为 true 后，空对象、token_type、status、id 任一不通过都回 401。
-	if info == nil || resp.GetTokenType() != tokenTypeWorb || info.GetStatus() != statusNormal || info.GetId() <= 0 {
+	// Agent: success 为 true 后，空对象、token_type、status、id 任一不通过都回 401。回包 token_type 必须是 worb_sk。
+	if info == nil || resp.GetTokenType() != tokenTypeRequest || info.GetStatus() != statusNormal || info.GetId() <= 0 {
 		// Agent: 响应体仍只有 invalid key。日志写明是哪一项不通过，不写 wandb key。
 		logerr.Errorf("query_user_by_token invalid key: %s", redactToken(invalidKeyReason(resp), token))
 		return "", 401
@@ -289,7 +288,7 @@ func invalidKeyReason(resp *userpb.UserInfoResponse) string {
 	if info == nil {
 		parts = append(parts, "missing user_cluster_info")
 	}
-	if resp.GetTokenType() != tokenTypeWorb {
+	if resp.GetTokenType() != tokenTypeRequest {
 		parts = append(parts, fmt.Sprintf("token_type=%q", resp.GetTokenType()))
 	}
 	if info != nil && info.GetStatus() != statusNormal {

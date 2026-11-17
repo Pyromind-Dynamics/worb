@@ -68,7 +68,7 @@ func okResponse(id int64) *userpb.UserInfoResponse {
 	return &userpb.UserInfoResponse{
 		Base:            &userpb.GrpcResponse{Success: true, ErrorCode: 500, Message: "ignored"},
 		UserClusterInfo: &userpb.UserClusterInfo{Id: id, Uid: 1000000359, Status: "normal"},
-		TokenType:       "worb",
+		TokenType:       "worb_sk",
 	}
 }
 
@@ -316,6 +316,13 @@ func TestUserIDFromResponse(t *testing.T) {
 	_, status = userIDFromResponse(bad, "secret")
 	if status != 401 || !strings.Contains(buf.String(), `token_type="other"`) {
 		t.Fatalf("token type status %d log %q", status, buf.String())
+	}
+	buf.Reset()
+	bad = okResponse(10000003)
+	bad.TokenType = "worb"
+	_, status = userIDFromResponse(bad, "secret")
+	if status != 401 || !strings.Contains(buf.String(), `token_type="worb"`) {
+		t.Fatalf("legacy token type status %d log %q", status, buf.String())
 	}
 	buf.Reset()
 	bad = okResponse(10000003)
