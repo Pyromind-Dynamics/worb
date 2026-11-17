@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sarna/worb/internal/logerr"
 	"github.com/sarna/worb/internal/userpb"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -99,14 +100,14 @@ func OpenFromEnv() error {
 	cfg, err := loadUserGRPCConfig(os.Getenv)
 	if err != nil {
 		// Agent: 地址或证书不满足时没有发起调用，单独记下没有校验。
-		log.Printf("query_user_by_token startup check skipped: %v", err)
+		logerr.Errorf("query_user_by_token startup check skipped: %v", err)
 		return err
 	}
 	// Agent: 启动时建一条连接，之后的请求复用它。
 	conn, err := grpc.NewClient(cfg.addr, grpc.WithTransportCredentials(cfg.creds))
 	if err != nil {
 		// Agent: 连接对象没有建成，调用没有发出，也记为没有校验。
-		log.Printf("query_user_by_token startup check skipped: %v", err)
+		logerr.Errorf("query_user_by_token startup check skipped: %v", err)
 		return err
 	}
 	rpc := userpb.NewUserClusterServiceClient(conn)
@@ -139,7 +140,7 @@ func probeUserService(ctx context.Context, rpc queryAPI) error {
 			err = errors.New("empty response")
 		}
 		// Agent: 启动检查不带 wandb key，传输错误可以原样写入日志。
-		log.Printf("query_user_by_token startup check failed code=%s err=%v", status.Code(err), err)
+		logerr.Errorf("query_user_by_token startup check failed code=%s err=%v", status.Code(err), err)
 		return fmt.Errorf("USER_GRPC_ADDR is unreachable: %w", err)
 	}
 	// Agent: 有回包即通过。日志不带 wandb key，这次调用本来也没有 key。
@@ -215,9 +216,12 @@ func (c *userClient) Lookup(ctx context.Context, token string) (string, int) {
 		Token:     token,
 		TokenType: tokenTypeRequest,
 	})
-	// Agent: 拨号失败、超时和传输错误都不读回包，回 500。日志只留状态码，不留 key。
+	// Agent: 拨号失败、超时和传输错误都不读回包，回 500。日志留状态码和错误文本，不留 key。
 	if err != nil || resp == nil {
-		log.Printf("query_user_by_token transport error code=%s", status.Code(err))
+		if err == nil {
+			err = errors.New("empty response")
+		}
+		logerr.Errorf("query_user_by_token transport error code=%s err=%s http=500", status.Code(err), redactToken(err.Error(), token))
 		return "", 500
 	}
 	userID, status := userIDFromResponse(resp, token)
@@ -232,23 +236,69 @@ func (c *userClient) Lookup(ctx context.Context, token string) (string, int) {
 // userIDFromResponse extracts the user_id using the confirmed success rules. Failures are logged without the key.
 func userIDFromResponse(resp *userpb.UserInfoResponse, token string) (string, int) {
 	base := resp.GetBase()
-	// Agent: 缺 base 或 success 不是 true 时忽略 id，回 500。
+	// Agent: 缺 base 或 success 不是 true 时忽略 id，回 500，并记下回包里能看的字段。
 	if base == nil || !base.GetSuccess() {
-		code := int32(0)
-		message := ""
-		if base != nil {
-			code = base.GetErrorCode()
-			message = base.GetMessage()
-		}
-		log.Printf("query_user_by_token rejected error_code=%d message=%s", code, redactToken(message, token))
+		logerr.Errorf("query_user_by_token rejected %s", redactToken(rejectedDetail(resp), token))
 		return "", 500
 	}
 	info := resp.GetUserClusterInfo()
 	// Agent: success 为 true 后，空对象、token_type、status、id 任一不通过都回 401。
 	if info == nil || resp.GetTokenType() != tokenTypeWorb || info.GetStatus() != statusNormal || info.GetId() <= 0 {
+		// Agent: 响应体仍只有 invalid key。日志写明是哪一项不通过，不写 wandb key。
+		logerr.Errorf("query_user_by_token invalid key: %s", redactToken(invalidKeyReason(resp), token))
 		return "", 401
 	}
 	return strconv.FormatInt(info.GetId(), 10), 0
+}
+
+// rejectedDetail 写出 success 不是 true 时的请求类型和回包字段。不包含 wandb key。
+// rejectedDetail records the request token type and response fields when success is not true. It does not include the wandb key.
+func rejectedDetail(resp *userpb.UserInfoResponse) string {
+	base := resp.GetBase()
+	reason := "base.success=false"
+	success := false
+	code := int32(0)
+	message := ""
+	// Agent: 没有 base 时不能把 success 当成 false 回包，原因单独写明。
+	if base == nil {
+		reason = "missing base"
+	} else {
+		success = base.GetSuccess()
+		code = base.GetErrorCode()
+		message = base.GetMessage()
+	}
+	info := resp.GetUserClusterInfo()
+	infoState := "missing"
+	userStatus := ""
+	var id int64
+	if info != nil {
+		infoState = "present"
+		userStatus = info.GetStatus()
+		id = info.GetId()
+	}
+	return fmt.Sprintf("reason=%s request_token_type=%s response_token_type=%q success=%t error_code=%d message=%q user_cluster_info=%s status=%q id=%d http=500",
+		reason, tokenTypeRequest, resp.GetTokenType(), success, code, message, infoState, userStatus, id)
+}
+
+// invalidKeyReason 列出 success 为 true 时仍不能换出 user_id 的字段。
+// invalidKeyReason lists the fields that still block a user_id after success is true.
+func invalidKeyReason(resp *userpb.UserInfoResponse) string {
+	var parts []string
+	info := resp.GetUserClusterInfo()
+	// Agent: 对象缺失时不再读取 status 和 id。
+	if info == nil {
+		parts = append(parts, "missing user_cluster_info")
+	}
+	if resp.GetTokenType() != tokenTypeWorb {
+		parts = append(parts, fmt.Sprintf("token_type=%q", resp.GetTokenType()))
+	}
+	if info != nil && info.GetStatus() != statusNormal {
+		parts = append(parts, fmt.Sprintf("status=%q", info.GetStatus()))
+	}
+	if info != nil && info.GetId() <= 0 {
+		parts = append(parts, fmt.Sprintf("id=%d", info.GetId()))
+	}
+	return strings.Join(parts, " ")
 }
 
 // redactToken 在错误文本包含 wandb key 时替换掉，避免把 key 打进日志。

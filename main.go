@@ -1,10 +1,10 @@
 package main
 
 import (
-	"log"
 	"os"
 	"path/filepath"
 
+	"github.com/sarna/worb/internal/logerr"
 	"github.com/sarna/worb/internal/server"
 	"github.com/spf13/cobra"
 )
@@ -46,6 +46,8 @@ func main() {
 	cmd.Flags().StringVar(&dbEngine, "db-engine", "sqlite", "database engine (sqlite, mysql, or turso)")
 
 	if err := cmd.Execute(); err != nil {
-		log.Fatal(err)
+		// Agent: 进程退出前先打原因和堆栈，日志里不重复打印 cobra 的用法。
+		logerr.Errorf("%v", err)
+		os.Exit(1)
 	}
 }
