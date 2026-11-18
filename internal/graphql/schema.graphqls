@@ -213,7 +213,8 @@ type Run {
   wandbConfig(keys: [String!]): JSONString
   projectId: Int
   fileCount: Int
-  files(names: [String!], after: String, first: Int = 50, pattern: String): FileReadConnection
+  # Agent: wandb 把 $fileNames 声明成 [String]。这里用同样的可空元素，否则校验直接 422。
+  files(names: [String], after: String, first: Int = 50, pattern: String): FileReadConnection
 }
 
 input CreateArtifactInput {

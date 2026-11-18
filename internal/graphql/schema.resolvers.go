@@ -11,8 +11,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"regexp"
-	"strings"
 
 	"github.com/google/uuid"
 	"github.com/sarna/worb/internal/auth"
@@ -661,39 +659,42 @@ func (r *runResolver) WandbConfig(ctx context.Context, obj *Run, keys []string) 
 // FileCount 返回这个 run 尚未软删的文件数。
 // FileCount returns how many files on this run are not soft-deleted.
 func (r *runResolver) FileCount(ctx context.Context, obj *Run) (*int, error) {
-	// Agent: wandb 用这个数作为文件列表长度。只数尚未软删的 run 文件。
+	// Agent: wandb 用这个数作为文件列表长度。COUNT 按 run_id 统计，不把文件行读进内存。
 	_ = ctx
 	if obj == nil || obj.ID == "" {
 		zero := 0
 		return &zero, nil
 	}
-	files, err := r.Store.ListVisibleRunFiles(obj.ID)
+	n, err := r.Store.CountVisibleRunFiles(obj.ID)
 	if err != nil {
 		return nil, err
 	}
-	n := len(files)
 	return &n, nil
 }
 
-// Files 返回 run 尚未软删的文件。url 固定为 upload 路径，directUrl 在有 object_key 时现签。
-// Files returns run files that are not soft-deleted. url stays the upload path, and directUrl is signed when an object key exists.
+// Files 按 names、pattern 和游标直接查询一页文件。url 固定为 upload 路径，directUrl 在有 object_key 时现签。
+// Files loads one page by names, pattern, and cursor. url stays the upload path, and directUrl is signed when an object key exists.
 func (r *runResolver) Files(ctx context.Context, obj *Run, names []string, after *string, first *int, pattern *string) (*FileReadConnection, error) {
 	if obj == nil || obj.ID == "" {
 		return emptyFileRead(), nil
 	}
-	files, err := r.Store.ListVisibleRunFiles(obj.ID)
+	// Agent: schema 接受 [String]，与 wandb 的 $fileNames 一致。传入的名字原样进 SQL。
+	page := store.VisibleFilePage{Names: names}
+	if after != nil {
+		page.AfterID = *after
+	}
+	if first != nil {
+		page.Limit = *first
+	}
+	if pattern != nil {
+		page.Pattern = *pattern
+	}
+	// Agent: 过滤和 LIMIT 都在 SQL 里完成。names 非空时走 (run_id, name) 索引。
+	files, more, err := r.Store.ListVisibleRunFilePage(obj.ID, page)
 	if err != nil {
 		return nil, err
 	}
-	matched := make([]store.VisibleFile, 0, len(files))
-	for _, file := range files {
-		if fileNameSelected(file.Name, names, pattern) {
-			matched = append(matched, file)
-		}
-	}
-	page, more := pageVisibleFiles(matched, after, first)
-	conn := r.readFiles(ctx, page)
-	// Agent: 超过 first 的剩余文件用 hasNextPage 告诉客户端继续翻页。
+	conn := r.readFiles(ctx, files)
 	conn.PageInfo.HasNextPage = more
 	return conn, nil
 }
@@ -751,64 +752,4 @@ func (r *Resolver) readFiles(ctx context.Context, files []store.VisibleFile) *Fi
 		}, Cursor: f.ID})
 	}
 	return &FileReadConnection{Edges: edges, PageInfo: &PageInfo{HasNextPage: false}}
-}
-
-// fileNameSelected 按 wandb 的 names 和 SQL LIKE pattern 过滤文件名。
-// fileNameSelected filters a file name with wandb's names list and SQL LIKE pattern.
-func fileNameSelected(name string, names []string, pattern *string) bool {
-	if len(names) > 0 {
-		found := false
-		for _, item := range names {
-			if item == name {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return false
-		}
-	}
-	if pattern == nil || *pattern == "" {
-		return true
-	}
-	return sqlLike(name, *pattern)
-}
-
-func sqlLike(value, pattern string) bool {
-	var b strings.Builder
-	b.WriteByte('^')
-	for _, r := range pattern {
-		switch r {
-		case '%':
-			b.WriteString(".*")
-		case '_':
-			b.WriteByte('.')
-		default:
-			b.WriteString(regexp.QuoteMeta(string(r)))
-		}
-	}
-	b.WriteByte('$')
-	ok, err := regexp.MatchString(b.String(), value)
-	return err == nil && ok
-}
-
-// pageVisibleFiles 按游标和 first 截取一页。游标是文件 id。
-// pageVisibleFiles returns one page after the file-id cursor and limited by first.
-func pageVisibleFiles(files []store.VisibleFile, after *string, first *int) ([]store.VisibleFile, bool) {
-	start := 0
-	if after != nil && *after != "" {
-		start = len(files)
-		for i, file := range files {
-			if file.ID == *after {
-				start = i + 1
-				break
-			}
-		}
-	}
-	rest := files[start:]
-	limit := len(rest)
-	if first != nil && *first >= 0 && *first < limit {
-		limit = *first
-	}
-	return rest[:limit], limit < len(rest)
 }

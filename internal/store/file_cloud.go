@@ -504,6 +504,101 @@ func (db *DB) ListVisibleRunFiles(runID string) ([]VisibleFile, error) {
 	return db.listVisibleFiles(SQLListVisibleRunFiles, runID)
 }
 
+// VisibleFilePage 是按入参取一页未软删 run 文件的条件。
+// VisibleFilePage is the filter for one page of run files that are not soft-deleted.
+type VisibleFilePage struct {
+	Names   []string
+	Pattern string
+	AfterID string
+	Limit   int
+}
+
+// CountVisibleRunFiles 统计一个 run 尚未软删的文件数。
+// CountVisibleRunFiles counts run files that are not soft-deleted.
+func (db *DB) CountVisibleRunFiles(runID string) (int, error) {
+	// Agent: COUNT 走 run_id 索引，不把 name 和 object_key 读进进程。
+	var n int
+	err := db.QueryRow(db.SQL(SQLCountVisibleRunFiles), runID).Scan(&n)
+	return n, err
+}
+
+// ListVisibleRunFilePage 按文件名、LIKE 和游标直接取一页。
+// ListVisibleRunFilePage loads one page by name, LIKE pattern, and cursor.
+func (db *DB) ListVisibleRunFilePage(runID string, page VisibleFilePage) ([]VisibleFile, bool, error) {
+	limit := page.Limit
+	// Agent: 缺省与 GraphQL 的 first=50 一致。单次最多 200 行，避免一次请求读完整张表。
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	var extra strings.Builder
+	args := make([]any, 0, 4+len(page.Names))
+	args = append(args, runID)
+	// Agent: 有文件名时只按 name 排序。带上 id 会让 SQLite 改走 run_id 索引，把这个 run 扫一遍。
+	order := " ORDER BY id"
+	if len(page.Names) > 0 {
+		order = " ORDER BY name"
+		extra.WriteString(" AND name IN (")
+		for i, name := range page.Names {
+			if i > 0 {
+				extra.WriteByte(',')
+			}
+			extra.WriteByte('?')
+			args = append(args, name)
+		}
+		extra.WriteByte(')')
+		if page.AfterID != "" {
+			var cursorName string
+			err := db.QueryRow(db.SQL(SQLSelectFileNameByID), page.AfterID, runID).Scan(&cursorName)
+			if err == sql.ErrNoRows {
+				return nil, false, nil
+			}
+			if err != nil {
+				return nil, false, err
+			}
+			// Agent: 名字索引上的下一页。游标 id 只在同名文件里区分先后。
+			extra.WriteString(" AND (name > ? OR (name = ? AND id > ?))")
+			args = append(args, cursorName, cursorName, page.AfterID)
+		}
+	} else if page.AfterID != "" {
+		// Agent: 没有文件名时按 (run_id, id) 做范围，读完一页就停。
+		extra.WriteString(" AND id > ?")
+		args = append(args, page.AfterID)
+	}
+	if page.Pattern != "" {
+		// Agent: pattern 是客户端自己的 SQL LIKE，只绑定参数，不拼进 SQL 文本。
+		extra.WriteString(" AND name LIKE ?")
+		args = append(args, page.Pattern)
+	}
+	args = append(args, limit+1)
+	query := strings.Replace(db.SQL(SQLListVisibleRunFilePage), "{extra}", extra.String(), 1)
+	query = strings.Replace(query, "{order}", order, 1)
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+	files := make([]VisibleFile, 0, limit)
+	for rows.Next() {
+		var f VisibleFile
+		if err := rows.Scan(&f.ID, &f.Name, &f.ObjectKey); err != nil {
+			return nil, false, err
+		}
+		files = append(files, f)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	// Agent: 多取一行只用来判断还有没有下一页，这一行不返回给客户端。
+	more := len(files) > limit
+	if more {
+		files = files[:limit]
+	}
+	return files, more, nil
+}
+
 // ListVisibleArtifactFiles 列出一个 artifact 尚未软删的文件。
 // ListVisibleArtifactFiles lists artifact files that are not soft-deleted.
 func (db *DB) ListVisibleArtifactFiles(artifactID string) ([]VisibleFile, error) {

@@ -5,7 +5,8 @@
 -- 表名相同，共 11 张。SQLite 用 TEXT/INTEGER/REAL，这里用 VARCHAR/LONGTEXT/INT/BIGINT/DOUBLE/DATETIME。
 -- SQLite 有的具名索引这里都有。SQLite 的 UNIQUE(entity, name) 在这里叫 uq_projects_entity_name，列相同。
 -- system_events、console_logs：SQLite 用隐式 rowid，这里用 id 自增主键。业务查询不读这个 id。
--- files 多了 idx_files_run_id，给外键用；SQLite 没有这一个索引。启动检查不要求这个名字。
+-- files 有 idx_files_run_id (run_id)，给外键和按 run 翻页用。启动检查要求这个名字。
+-- files 另有 idx_files_run_name (run_id, name(191))。name 是 VARCHAR(1024)，utf8mb4 下整列放不进 InnoDB 索引，所以只索引前 191 个字符。等值查找仍会回表核对完整文件名。
 -- artifact_files 的五个二级索引和外键，启动检查要求必须有。SQLite 只建了表，没有这些索引，也没有外键。
 -- runs.tags：SQLite 默认 '[]'，这里没有默认值。应用插入时会写入 tags。
 -- projects.name：SQLite 是不限长的 TEXT，这里是 VARCHAR(191)，否则 (entity, name) 唯一索引超过 InnoDB 长度上限。
@@ -157,6 +158,7 @@ CREATE TABLE files (
   updated_at DATETIME NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '行更新时间。进入永久失败时也会更新',
   PRIMARY KEY (id),
   KEY idx_files_run_id (run_id),
+  KEY idx_files_run_name (run_id, name(191)),
   KEY idx_files_entity (entity),
   KEY idx_files_entity_key (entity_key),
   KEY idx_files_status (status),

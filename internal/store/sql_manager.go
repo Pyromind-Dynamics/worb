@@ -51,6 +51,9 @@ const (
 	SQLIdxFileEntityKey    SQLID = 37
 	SQLIdxFileStatus       SQLID = 38
 	SQLIdxFileDeleted      SQLID = 39
+	// Agent: 按 run 翻页走 (run_id, id)；按文件名定位走 (run_id, name)。
+	SQLIdxFileRunID   SQLID = 40
+	SQLIdxFileRunName SQLID = 41
 
 	SQLSelectProjectByEntityName SQLID = 100
 	SQLInsertProject             SQLID = 101
@@ -187,6 +190,10 @@ const (
 	SQLCountAllFilesByRun        SQLID = 452
 	SQLListVisibleRunFiles       SQLID = 453
 	SQLListVisibleArtFiles       SQLID = 454
+	// Agent: 文件数用 COUNT，文件页按入参过滤，避免把一个 run 的文件全部读进内存。
+	SQLCountVisibleRunFiles   SQLID = 455
+	SQLListVisibleRunFilePage SQLID = 456
+	SQLSelectFileNameByID     SQLID = 457
 )
 
 // Agent: SQLite 与 MySQL 各一份常量表。编号相同，文本按引擎语义分开写。
@@ -247,6 +254,7 @@ func alterSQLIDs() []SQLID {
 		SQLAlterFileETag, SQLAlterFileError, SQLAlterFileRetry, SQLAlterFileLocalDel,
 		SQLAlterFileDeleted, SQLAlterFileUpdated,
 		SQLIdxFileEntity, SQLIdxFileEntityKey, SQLIdxFileStatus, SQLIdxFileDeleted,
+		SQLIdxFileRunID, SQLIdxFileRunName,
 	}
 }
 

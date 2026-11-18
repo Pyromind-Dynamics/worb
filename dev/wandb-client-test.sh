@@ -189,10 +189,10 @@ def main():
     def delete_one(api, name):
         remote = load_run(api, holder["entity"], holder["project"], holder["run_id"])
         target = None
-        for item in remote.files():
-            if getattr(item, "name", None) == name:
-                target = item
-                break
+        # 按文件名查询。不带 names 时客户端会把这个 run 的文件逐页拉完。
+        for item in remote.files(names=[name]):
+            target = item
+            break
         if target is None:
             raise RuntimeError("远端没有文件 %s" % name)
         target.delete()
