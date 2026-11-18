@@ -28,6 +28,10 @@ func registerFileCloudSQL() {
 	sqliteSQLs[SQLIdxFileEntityKey] = `CREATE INDEX IF NOT EXISTS idx_files_entity_key ON files(entity_key)`
 	sqliteSQLs[SQLIdxFileStatus] = `CREATE INDEX IF NOT EXISTS idx_files_status ON files(status)`
 	sqliteSQLs[SQLIdxFileDeleted] = `CREATE INDEX IF NOT EXISTS idx_files_deleted_at ON files(deleted_at)`
+	// Agent: (run_id, id) 让未带文件名的翻页按主键范围停在 LIMIT，不扫整个 run。
+	sqliteSQLs[SQLIdxFileRunID] = `CREATE INDEX IF NOT EXISTS idx_files_run_id ON files(run_id, id)`
+	// Agent: (run_id, name) 让 names 入参变成索引等值查找。SQLite 可以索引完整文件名。
+	sqliteSQLs[SQLIdxFileRunName] = `CREATE INDEX IF NOT EXISTS idx_files_run_name ON files(run_id, name)`
 
 	// Agent: MySQL DDL 只给 schema 对照，checkMySQLSchema 不执行它。
 	mysqlSQLs[SQLCreateArtifactFiles] = `CREATE TABLE artifact_files (
@@ -54,6 +58,7 @@ func registerFileCloudSQL() {
 		SQLAlterFileETag, SQLAlterFileError, SQLAlterFileRetry, SQLAlterFileLocalDel,
 		SQLAlterFileDeleted, SQLAlterFileUpdated, SQLIdxFileEntity, SQLIdxFileEntityKey,
 		SQLIdxFileStatus, SQLIdxFileDeleted,
+		SQLIdxFileRunID, SQLIdxFileRunName,
 	} {
 		// Agent: MySQL 禁止应用改表，这些编号给成空操作，避免误执行。
 		mysqlSQLs[id] = `SELECT 1`
@@ -126,6 +131,12 @@ func registerFileDML(dst map[SQLID]string, mysql bool) {
 	dst[SQLCountAllFilesByRun] = `SELECT (SELECT COUNT(*) FROM files WHERE run_id=?) + (SELECT COUNT(*) FROM artifact_files WHERE run_id=?)`
 	// Agent: 查询只返回未软删的行，并带上 object_key 供现签。
 	dst[SQLListVisibleRunFiles] = `SELECT id, name, COALESCE(object_key,'') FROM files WHERE run_id=? AND deleted_at IS NULL ORDER BY name`
+	// Agent: 只数未软删行。run_id 上的索引足够，不必把文件行读出来。
+	dst[SQLCountVisibleRunFiles] = `SELECT COUNT(*) FROM files WHERE run_id=? AND deleted_at IS NULL`
+	// Agent: {extra} 只由本包拼上固定片段。文件名、pattern、游标都走占位符。
+	dst[SQLListVisibleRunFilePage] = `SELECT id, name, COALESCE(object_key,'') FROM files WHERE run_id=? AND deleted_at IS NULL{extra}{order} LIMIT ?`
+	// Agent: 按主键取出游标对应的文件名，供名字索引上的范围翻页使用。
+	dst[SQLSelectFileNameByID] = `SELECT name FROM files WHERE id=? AND run_id=? AND deleted_at IS NULL`
 	dst[SQLListVisibleArtFiles] = `SELECT id, name, COALESCE(object_key,'') FROM artifact_files WHERE artifact_id=? AND deleted_at IS NULL ORDER BY name`
 	// Agent: SQLite 不执行这句。MySQL 用会话锁让 Q39 一轮只有一个副本跑。
 	if mysql {

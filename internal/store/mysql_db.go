@@ -348,7 +348,8 @@ func mysqlExpectedTables() []mysqlTableSpec {
 				{"error_message", "varchar(1024)"}, {"retry_count", "int"}, {"local_deleted_at", "datetime"},
 				{"deleted_at", "datetime"}, {"updated_at", "datetime"},
 			},
-			Indexes: []string{"PRIMARY", "idx_files_entity", "idx_files_entity_key", "idx_files_status", "idx_files_deleted_at"},
+			// Agent: idx_files_run_name 是按文件名定位的索引。缺了它启动失败，避免退回全表扫描。
+			Indexes: []string{"PRIMARY", "idx_files_entity", "idx_files_entity_key", "idx_files_status", "idx_files_deleted_at", "idx_files_run_id", "idx_files_run_name"},
 		},
 		{
 			// Agent: Artifact 文件单独成表，外键指向 artifacts，不级联删除。
