@@ -148,6 +148,104 @@ func TestHistoryUsesWandbStepNotFileOffset(t *testing.T) {
 	}
 }
 
+func historyObj(t *testing.T, v map[string]any) map[string]json.RawMessage {
+	t.Helper()
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(mustJSON(t, v), &obj); err != nil {
+		t.Fatalf("historyObj: %v", err)
+	}
+	return obj
+}
+
+// TestWandbHistoryStepFields `_step` 是 wandb 标准；没有时才认 `step`；都没有用行号。
+// TestWandbHistoryStepFields uses wandb `_step` first, then `step`, then the file_stream offset.
+func TestWandbHistoryStepFields(t *testing.T) {
+	cases := []struct {
+		name     string
+		obj      map[string]any
+		fallback int
+		wantStep int
+		wantX    bool
+		wantXVal float64
+	}{
+		{name: "wandb _step", obj: map[string]any{"_step": 20.0, "loss": 1.0}, fallback: 0, wantStep: 20, wantX: true, wantXVal: 20},
+		{name: "plain step", obj: map[string]any{"step": 15.0, "loss": 1.0}, fallback: 0, wantStep: 15, wantX: true, wantXVal: 15},
+		// Agent: 同时有 `_step` 和 `step` 时必须用 wandb 标准 `_step`。
+		{name: "prefer _step", obj: map[string]any{"_step": 20.0, "step": 99.0, "loss": 1.0}, fallback: 0, wantStep: 20, wantX: true, wantXVal: 20},
+		{name: "invalid _step uses step", obj: map[string]any{"_step": "x", "step": 7.0, "loss": 1.0}, fallback: 0, wantStep: 7, wantX: true, wantXVal: 7},
+		{name: "offset fallback", obj: map[string]any{"loss": 1.0}, fallback: 3, wantStep: 3, wantX: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			step, x := wandbHistoryStep(historyObj(t, tc.obj), tc.fallback)
+			if step != tc.wantStep {
+				t.Fatalf("step=%d want %d", step, tc.wantStep)
+			}
+			if tc.wantX {
+				if x == nil || *x != tc.wantXVal {
+					t.Fatalf("xStep=%v want %v", x, tc.wantXVal)
+				}
+				return
+			}
+			if x != nil {
+				t.Fatalf("xStep=%v want nil", *x)
+			}
+		})
+	}
+}
+
+// TestParseHistoryRowsStepNotAMetric `_step`/`step` 只当坐标，不会当成一条叫 step 的指标。
+// TestParseHistoryRowsStepNotAMetric keeps `_step`/`step` as the axis, not as a plotted metric.
+func TestParseHistoryRowsStepNotAMetric(t *testing.T) {
+	scalars, _ := parseHistoryRows([]struct {
+		Step int
+		Data json.RawMessage
+	}{
+		{Step: 0, Data: mustJSON(t, map[string]any{"_step": 20.0, "step": 99.0, "loss": 1.5})},
+	})
+	if len(scalars) != 1 {
+		t.Fatalf("got %d scalars, want 1", len(scalars))
+	}
+	if scalars[0].key != "loss" || scalars[0].step != 20 {
+		t.Fatalf("key=%s step=%d", scalars[0].key, scalars[0].step)
+	}
+	if scalars[0].xStep == nil || *scalars[0].xStep != 20 {
+		t.Fatalf("xStep=%v want 20", scalars[0].xStep)
+	}
+}
+
+// TestHistoryPlainStepWithoutUnderscore 只有 JSON `step` 时主键和图表 x 也用它，兼容旧解析和迁移数据。
+// TestHistoryPlainStepWithoutUnderscore uses JSON `step` for PK and chart x when `_step` is absent.
+func TestHistoryPlainStepWithoutUnderscore(t *testing.T) {
+	db := setupTestDB(t)
+	run, err := db.UpsertRun(UpsertRunParams{Entity: "local", Project: "history-plain-step", Name: "run1"})
+	if err != nil {
+		t.Fatalf("UpsertRun: %v", err)
+	}
+	batch := []struct {
+		Step int
+		Data json.RawMessage
+	}{
+		{Step: 0, Data: mustJSON(t, map[string]any{"step": 40.0, "acc": 0.2})},
+	}
+	if err := db.InsertHistoryBatch(run.ID, batch); err != nil {
+		t.Fatalf("InsertHistoryBatch: %v", err)
+	}
+	db.Flush()
+
+	var points []ScalarPoint
+	err = db.StreamHistoryScalars(run.ID, 0, []string{"acc"}, nil, nil, func(p ScalarPoint) error {
+		points = append(points, p)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("StreamHistoryScalars: %v", err)
+	}
+	if len(points) != 1 || points[0].Step != 40 {
+		t.Fatalf("points=%v want step 40", points)
+	}
+}
+
 func mustJSON(t *testing.T, v map[string]any) json.RawMessage {
 	t.Helper()
 	data, err := json.Marshal(v)

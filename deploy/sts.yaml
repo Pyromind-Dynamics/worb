@@ -1,4 +1,4 @@
-# 生产 webapp / 8890。预发只改 namespace=webapp-pre，port 与 containerPort 仍是 8890。
+# 生产 webapp / 8890。预发只改 namespace=webapp-pre，并把 APP_ENV 改成 pre；port 与 containerPort 仍是 8890。
 # 镜像、USER_GRPC_ADDR、Secret 和 PVC 按集群填写。口令只放在 Secret 里，不写进 env。
 # Q44：多个副本共写同一个 dataDir，PVC 需要 ReadWriteMany。
 apiVersion: v1
@@ -52,6 +52,8 @@ spec:
               value: "/data"
             - name: dbEngine
               value: "mysql"
+            - name: APP_ENV
+              value: "prod"
             - name: OBJECT_STORE
               value: "oss"
             - name: USER_GRPC_ADDR
