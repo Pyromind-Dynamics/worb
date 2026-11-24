@@ -95,6 +95,59 @@ func TestStreamHistoryScalarsBackfillsRunSteps(t *testing.T) {
 	}
 }
 
+func TestHistoryUsesWandbStepNotFileOffset(t *testing.T) {
+	db := setupTestDB(t)
+
+	run, err := db.UpsertRun(UpsertRunParams{Entity: "local", Project: "history-wandb-step", Name: "run1"})
+	if err != nil {
+		t.Fatalf("UpsertRun: %v", err)
+	}
+
+	// Agent: file_stream 行号从 0 起，JSON 里的 `_step` 从 20 起，图表应显示 20。
+	batch := []struct {
+		Step int
+		Data json.RawMessage
+	}{
+		{Step: 0, Data: mustJSON(t, map[string]any{"_step": 20.0, "train/loss": 1.0})},
+		{Step: 1, Data: mustJSON(t, map[string]any{"_step": 21.0, "train/loss": 0.9})},
+		{Step: 2, Data: mustJSON(t, map[string]any{"_step": 29.0, "train/loss": 0.5})},
+		{Step: 3, Data: mustJSON(t, map[string]any{"loss": 0.1})},
+	}
+
+	if err := db.InsertHistoryBatch(run.ID, batch); err != nil {
+		t.Fatalf("InsertHistoryBatch: %v", err)
+	}
+	db.Flush()
+
+	var points []ScalarPoint
+	err = db.StreamHistoryScalars(run.ID, 0, []string{"train/loss", "loss"}, nil, nil, func(p ScalarPoint) error {
+		points = append(points, p)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("StreamHistoryScalars: %v", err)
+	}
+
+	got := map[string][]float64{}
+	for _, p := range points {
+		got[p.Key] = append(got[p.Key], p.Step)
+	}
+	if len(got["train/loss"]) != 3 || got["train/loss"][0] != 20 || got["train/loss"][1] != 21 || got["train/loss"][2] != 29 {
+		t.Fatalf("train/loss steps = %v, want 20,21,29", got["train/loss"])
+	}
+	if len(got["loss"]) != 1 || got["loss"][0] != 3 {
+		t.Fatalf("fallback loss step = %v, want file offset 3", got["loss"])
+	}
+
+	var minStep, maxStep int
+	if err := db.QueryRow("SELECT MIN(step), MAX(step) FROM history_scalars WHERE run_id = ? AND `key` = ?", run.ID, "train/loss").Scan(&minStep, &maxStep); err != nil {
+		t.Fatalf("min/max step: %v", err)
+	}
+	if minStep != 20 || maxStep != 29 {
+		t.Fatalf("stored train/loss steps min=%d max=%d, want 20..29", minStep, maxStep)
+	}
+}
+
 func mustJSON(t *testing.T, v map[string]any) json.RawMessage {
 	t.Helper()
 	data, err := json.Marshal(v)

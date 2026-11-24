@@ -41,6 +41,25 @@ type parsedHistogram struct {
 	vals  string
 }
 
+// wandbHistoryStep 从历史 JSON 取出客户端传入的训练 step。优先 `_step`（wandb.log(step=)），其次 `step`；都没有时用 file_stream 行号。
+// wandbHistoryStep reads the client training step from a history line. It prefers `_step` (wandb.log(step=)), then `step`, else the file_stream offset.
+func wandbHistoryStep(obj map[string]json.RawMessage, fallback int) (int, *float64) {
+	// Agent: wandb 把 run.log(..., step=N) 写成 `_step`，不是 file_stream 的行偏移。
+	for _, key := range []string{"_step", "step"} {
+		raw, ok := obj[key]
+		if !ok {
+			continue
+		}
+		var v float64
+		if json.Unmarshal(raw, &v) != nil {
+			continue
+		}
+		x := v
+		return int(v), &x
+	}
+	return fallback, nil
+}
+
 func parseHistoryRows(rows []struct {
 	Step int
 	Data json.RawMessage
@@ -54,13 +73,8 @@ func parseHistoryRows(rows []struct {
 			continue
 		}
 
-		var xStep *float64
-		if raw, ok := obj["step"]; ok {
-			var v float64
-			if json.Unmarshal(raw, &v) == nil {
-				xStep = &v
-			}
-		}
+		// Agent: 主键 step 与图表 x 轴都用 wandb 传入的 step，避免 /runs/ 从 0 起画。
+		step, xStep := wandbHistoryStep(obj, r.Step)
 
 		for key, raw := range obj {
 			if len(key) > 0 && key[0] == '_' || key == "step" {
@@ -68,7 +82,7 @@ func parseHistoryRows(rows []struct {
 			}
 			var v float64
 			if json.Unmarshal(raw, &v) == nil {
-				scalars = append(scalars, parsedScalar{step: r.Step, key: key, value: v, xStep: xStep})
+				scalars = append(scalars, parsedScalar{step: step, key: key, value: v, xStep: xStep})
 				continue
 			}
 			var histObj struct {
@@ -79,7 +93,7 @@ func parseHistoryRows(rows []struct {
 			if json.Unmarshal(raw, &histObj) == nil && histObj.Type == "histogram" && len(histObj.Bins) >= 2 && len(histObj.Values) > 0 {
 				binsJSON, _ := json.Marshal(histObj.Bins)
 				valsJSON, _ := json.Marshal(histObj.Values)
-				histograms = append(histograms, parsedHistogram{step: r.Step, key: key, xStep: xStep, bins: string(binsJSON), vals: string(valsJSON)})
+				histograms = append(histograms, parsedHistogram{step: step, key: key, xStep: xStep, bins: string(binsJSON), vals: string(valsJSON)})
 			}
 		}
 	}
