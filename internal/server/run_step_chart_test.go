@@ -41,9 +41,9 @@ func TestRunChartHistoryStartsAtLoggedStep(t *testing.T) {
 
 	run, err := db.UpsertRun(store.UpsertRunParams{
 		Entity:      "local",
-		Project:     "step-from-20",
-		Name:        "run-step20",
-		DisplayName: "step-from-20",
+		Project:     "step-from-31",
+		Name:        "run-step31",
+		DisplayName: "step-from-31",
 	})
 	if err != nil {
 		t.Fatalf("UpsertRun: %v", err)
@@ -54,7 +54,8 @@ func TestRunChartHistoryStartsAtLoggedStep(t *testing.T) {
 		Data json.RawMessage
 	}, 10)
 	for i := 0; i < 10; i++ {
-		step := 20 + i
+		// Agent: 用奇数起点 31，才能覆盖 Chart.js 把轴 floor 成 30 的情况。
+		step := 31 + i
 		batch[i] = struct {
 			Step int
 			Data json.RawMessage
@@ -105,8 +106,8 @@ func TestRunChartHistoryStartsAtLoggedStep(t *testing.T) {
 	if err := sc.Err(); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
-	if len(steps) != 10 || steps[0] != 20 || steps[len(steps)-1] != 29 {
-		t.Fatalf("history steps = %v, want 20..29", steps)
+	if len(steps) != 10 || steps[0] != 31 || steps[len(steps)-1] != 40 {
+		t.Fatalf("history steps = %v, want 31..40", steps)
 	}
 
 	if os.Getenv("WORB_KEEP_UI") == "1" {

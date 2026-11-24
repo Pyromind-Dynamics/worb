@@ -198,6 +198,19 @@
         document.getElementById('chart-settings').classList.toggle('open');
     }
 
+    // xAxisMinFromXY 只取数据最小 x 作为轴左端。最大值仍用 Chart.js ticks 和 suggestedMax。
+    // xAxisMinFromXY sets only the left edge from the smallest x. Max still uses Chart.js ticks and suggestedMax.
+    function xAxisMinFromXY(datasets) {
+        // Agent: 不设 bounds:data，避免把右端也改成数据 max。
+        let m = Infinity;
+        for (const ds of datasets || []) {
+            for (const p of ds.data || []) {
+                if (p && p.x < m) m = p.x;
+            }
+        }
+        return Number.isFinite(m) ? m : undefined;
+    }
+
     function smoothEMA(data, param) {
         if (param <= 0 || data.length < 2) return data;
         const alpha = 1 - param;
@@ -1069,9 +1082,14 @@
         }) : (() => {
             const exXType = chartSettings.xLog ? 'logarithmic' : 'linear';
             const exYType = chartSettings.yLog ? 'logarithmic' : 'linear';
-            const exXScale = { type: exXType, title: { display: true, text: 'step', color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { color: '#30363d' } };
+            // Agent: 放大图只钉 min，右端保持原来的 ticks 取整。
+            const exXScale = { type: exXType, beginAtZero: false, title: { display: true, text: 'step', color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { color: '#30363d' } };
             const exYScale = { type: exYType, title: { display: true, text: key, color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { color: '#30363d' } };
             if (chartSettings.xMin !== '') exXScale.min = Number(chartSettings.xMin);
+            else {
+                const dataMin = xAxisMinFromXY(data.datasets);
+                if (dataMin !== undefined) exXScale.min = dataMin;
+            }
             if (chartSettings.xMax !== '') exXScale.max = Number(chartSettings.xMax);
             if (chartSettings.yMin !== '') exYScale.min = Number(chartSettings.yMin);
             if (chartSettings.yMax !== '') exYScale.max = Number(chartSettings.yMax);
@@ -1290,6 +1308,7 @@
         const yType = chartSettings.yLog ? 'logarithmic' : 'linear';
         const xScale = {
             type: xType,
+            beginAtZero: false,
             ...(loadingHistory && maxHistoryLineCount > 0 ? { suggestedMax: maxHistoryLineCount } : {}),
             title: { display: true, text: 'step', color: '#8b949e' },
             ticks: { color: '#8b949e' },
@@ -1301,7 +1320,9 @@
             ticks: { color: '#8b949e' },
             grid: { color: '#30363d' },
         };
+        // Agent: 只写 min；max 仍不设，加载中 suggestedMax 和 ticks 取整与原来相同。
         if (chartSettings.xMin !== '') xScale.min = Number(chartSettings.xMin);
+        else if (labels.length) xScale.min = labels[0];
         if (chartSettings.xMax !== '') xScale.max = Number(chartSettings.xMax);
         if (chartSettings.yMin !== '') yScale.min = Number(chartSettings.yMin);
         if (chartSettings.yMax !== '') yScale.max = Number(chartSettings.yMax);
@@ -1802,6 +1823,12 @@
                             xScale.suggestedMax = maxHistoryLineCount;
                         } else {
                             delete xScale.suggestedMax;
+                        }
+                        // Agent: 流式刷新只更新左端 min，不写 max。
+                        if (chartSettings.xMin !== '') xScale.min = Number(chartSettings.xMin);
+                        else {
+                            const dataMin = xAxisMinFromXY(dsArr);
+                            if (dataMin !== undefined) xScale.min = dataMin;
                         }
                         chart.update(loadingHistory ? 'none' : undefined);
                         }
