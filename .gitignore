@@ -11,3 +11,7 @@ __pycache__/
 pyromind.md
 worb修改记录.md
 worb接入方案.md
+dev/wandb-client-test.sh
+dev/wandb-client-test-v2.sh
+dev/wandb-client-test-v3.sh
+dev/wandb客户端测试.md
