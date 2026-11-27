@@ -33,3 +33,15 @@ models:
     fields:
       wandbConfig:
         resolver: true
+      fileCount:
+        resolver: true
+      files:
+        resolver: true
+  FileRead:
+    fields:
+      url:
+        resolver: true
+  Artifact:
+    fields:
+      files:
+        resolver: true

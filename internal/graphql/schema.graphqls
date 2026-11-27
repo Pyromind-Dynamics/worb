@@ -33,6 +33,16 @@ type Mutation {
   createArtifactManifest(input: CreateArtifactManifestInput!): CreateArtifactManifestPayload
   createArtifactFiles(input: CreateArtifactFilesInput!): CreateArtifactFilesPayload
   createRunFiles(input: CreateRunFilesInput!): CreateRunFilesPayload
+  deleteFiles(input: DeleteFilesInput!): DeleteFilesPayload
+}
+
+input DeleteFilesInput {
+  files: [ID!]!
+  projectId: Int
+}
+
+type DeleteFilesPayload {
+  success: Boolean
 }
 
 scalar JSONString
@@ -201,6 +211,10 @@ type Run {
   historyKeys: JSONString
   user: RunUser
   wandbConfig(keys: [String!]): JSONString
+  projectId: Int
+  fileCount: Int
+  # Agent: wandb 把 $fileNames 声明成 [String]。这里用同样的可空元素，否则校验直接 422。
+  files(names: [String], after: String, first: Int = 50, pattern: String): FileReadConnection
 }
 
 input CreateArtifactInput {
@@ -229,6 +243,28 @@ type Artifact {
   id: String!
   state: String
   currentManifest: ArtifactManifest
+  files: FileReadConnection
+}
+
+type FileReadConnection {
+  edges: [FileReadEdge!]!
+  pageInfo: PageInfo!
+}
+
+type FileReadEdge {
+  node: FileRead!
+  cursor: String!
+}
+
+type FileRead {
+  id: String!
+  name: String!
+  url(upload: Boolean): String
+  directUrl: String
+  sizeBytes: Int
+  mimetype: String
+  updatedAt: String
+  md5: String
 }
 
 type ArtifactManifest {

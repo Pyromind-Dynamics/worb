@@ -17,9 +17,10 @@ type APIKeyEdge struct {
 }
 
 type Artifact struct {
-	ID              string            `json:"id"`
-	State           *string           `json:"state,omitempty"`
-	CurrentManifest *ArtifactManifest `json:"currentManifest,omitempty"`
+	ID              string              `json:"id"`
+	State           *string             `json:"state,omitempty"`
+	CurrentManifest *ArtifactManifest   `json:"currentManifest,omitempty"`
+	Files           *FileReadConnection `json:"files,omitempty"`
 }
 
 type ArtifactAliasInput struct {
@@ -105,6 +106,15 @@ type CreateRunFilesPayload struct {
 	UploadHeaders []string          `json:"uploadHeaders,omitempty"`
 }
 
+type DeleteFilesInput struct {
+	Files     []string `json:"files"`
+	ProjectID *int     `json:"projectId,omitempty"`
+}
+
+type DeleteFilesPayload struct {
+	Success *bool `json:"success,omitempty"`
+}
+
 type Entity struct {
 	ID           string        `json:"id"`
 	Name         string        `json:"name"`
@@ -127,6 +137,27 @@ type FileEdge struct {
 type FileNode struct {
 	ID        string  `json:"id"`
 	DirectURL *string `json:"directUrl,omitempty"`
+}
+
+type FileRead struct {
+	ID        string  `json:"id"`
+	Name      string  `json:"name"`
+	URL       *string `json:"url,omitempty"`
+	DirectURL *string `json:"directUrl,omitempty"`
+	SizeBytes *int    `json:"sizeBytes,omitempty"`
+	Mimetype  *string `json:"mimetype,omitempty"`
+	UpdatedAt *string `json:"updatedAt,omitempty"`
+	Md5       *string `json:"md5,omitempty"`
+}
+
+type FileReadConnection struct {
+	Edges    []*FileReadEdge `json:"edges"`
+	PageInfo *PageInfo       `json:"pageInfo"`
+}
+
+type FileReadEdge struct {
+	Node   *FileRead `json:"node"`
+	Cursor string    `json:"cursor"`
 }
 
 type FileUploadInfo struct {
@@ -166,36 +197,39 @@ type Query struct {
 }
 
 type Run struct {
-	ID               string   `json:"id"`
-	Name             string   `json:"name"`
-	DisplayName      *string  `json:"displayName,omitempty"`
-	Project          *Project `json:"project,omitempty"`
-	Config           *string  `json:"config,omitempty"`
-	SummaryMetrics   *string  `json:"summaryMetrics,omitempty"`
-	State            *string  `json:"state,omitempty"`
-	Host             *string  `json:"host,omitempty"`
-	Program          *string  `json:"program,omitempty"`
-	Commit           *string  `json:"commit,omitempty"`
-	Tags             []string `json:"tags,omitempty"`
-	Description      *string  `json:"description,omitempty"`
-	Notes            *string  `json:"notes,omitempty"`
-	Group            *string  `json:"group,omitempty"`
-	JobType          *string  `json:"jobType,omitempty"`
-	SweepName        *string  `json:"sweepName,omitempty"`
-	HistoryLineCount *int     `json:"historyLineCount,omitempty"`
-	EventsLineCount  *int     `json:"eventsLineCount,omitempty"`
-	LogLineCount     *int     `json:"logLineCount,omitempty"`
-	CreatedAt        *string  `json:"createdAt,omitempty"`
-	UpdatedAt        *string  `json:"updatedAt,omitempty"`
-	HeartbeatAt      *string  `json:"heartbeatAt,omitempty"`
-	HistoryTail      *string  `json:"historyTail,omitempty"`
-	EventsTail       *string  `json:"eventsTail,omitempty"`
-	ReadOnly         *bool    `json:"readOnly,omitempty"`
-	Stopped          *bool    `json:"stopped,omitempty"`
-	SystemMetrics    *string  `json:"systemMetrics,omitempty"`
-	HistoryKeys      *string  `json:"historyKeys,omitempty"`
-	User             *RunUser `json:"user,omitempty"`
-	WandbConfig      *string  `json:"wandbConfig,omitempty"`
+	ID               string              `json:"id"`
+	Name             string              `json:"name"`
+	DisplayName      *string             `json:"displayName,omitempty"`
+	Project          *Project            `json:"project,omitempty"`
+	Config           *string             `json:"config,omitempty"`
+	SummaryMetrics   *string             `json:"summaryMetrics,omitempty"`
+	State            *string             `json:"state,omitempty"`
+	Host             *string             `json:"host,omitempty"`
+	Program          *string             `json:"program,omitempty"`
+	Commit           *string             `json:"commit,omitempty"`
+	Tags             []string            `json:"tags,omitempty"`
+	Description      *string             `json:"description,omitempty"`
+	Notes            *string             `json:"notes,omitempty"`
+	Group            *string             `json:"group,omitempty"`
+	JobType          *string             `json:"jobType,omitempty"`
+	SweepName        *string             `json:"sweepName,omitempty"`
+	HistoryLineCount *int                `json:"historyLineCount,omitempty"`
+	EventsLineCount  *int                `json:"eventsLineCount,omitempty"`
+	LogLineCount     *int                `json:"logLineCount,omitempty"`
+	CreatedAt        *string             `json:"createdAt,omitempty"`
+	UpdatedAt        *string             `json:"updatedAt,omitempty"`
+	HeartbeatAt      *string             `json:"heartbeatAt,omitempty"`
+	HistoryTail      *string             `json:"historyTail,omitempty"`
+	EventsTail       *string             `json:"eventsTail,omitempty"`
+	ReadOnly         *bool               `json:"readOnly,omitempty"`
+	Stopped          *bool               `json:"stopped,omitempty"`
+	SystemMetrics    *string             `json:"systemMetrics,omitempty"`
+	HistoryKeys      *string             `json:"historyKeys,omitempty"`
+	User             *RunUser            `json:"user,omitempty"`
+	WandbConfig      *string             `json:"wandbConfig,omitempty"`
+	ProjectID        *int                `json:"projectId,omitempty"`
+	FileCount        *int                `json:"fileCount,omitempty"`
+	Files            *FileReadConnection `json:"files,omitempty"`
 }
 
 type RunConnection struct {

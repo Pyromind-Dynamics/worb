@@ -124,12 +124,12 @@ func (db *DB) processLogs(items []logItem) error {
 	return nil
 }
 
-// counterQueries maps counter columns to queries that return the actual count.
-// Using absolute counts instead of additive deltas makes re-migration idempotent.
-var counterQueries = map[string]string{
-	"history_line_count": "SELECT COUNT(*) FROM run_steps WHERE run_id = ?",
-	"events_line_count":  "SELECT COUNT(*) FROM system_events WHERE run_id = ?",
-	"log_line_count":     "SELECT COUNT(*) FROM console_logs WHERE run_id = ?",
+// counterQueryIDs 把计数列映射到 sql_manager 编号。用绝对计数，重复迁移也安全。
+// counterQueryIDs maps counter columns to sql_manager IDs. Absolute counts keep remigration safe.
+var counterQueryIDs = map[string]SQLID{
+	"history_line_count": SQLCountRunSteps,
+	"events_line_count":  SQLCountSysEvents,
+	"log_line_count":     SQLCountConsLogs,
 }
 
 func (db *DB) processCounters(items []counterDelta) error {
@@ -147,17 +147,23 @@ func (db *DB) processCounters(items []counterDelta) error {
 		seen[key{item.runID, item.column}] = true
 	}
 	for k := range seen {
-		query, ok := counterQueries[k.column]
+		id, ok := counterQueryIDs[k.column]
 		if !ok {
 			log.Printf("[flush] WARN unknown counter column %q", k.column)
 			continue
 		}
 		var count int
-		if err := db.QueryRow(query, k.runID).Scan(&count); err != nil {
+		if err := db.QueryRow(db.SQL(id), k.runID).Scan(&count); err != nil {
 			log.Printf("[flush] ERROR count %s run=%s: %v", k.column, k.runID[:8], err)
 			continue
 		}
-		if _, err := db.Exec("UPDATE runs SET "+k.column+" = ?, updated_at = current_timestamp WHERE id = ?", count, k.runID); err != nil {
+		// Agent: 计数字段更新只允许三个已知列，语句按编号取。
+		updateSQL, err := db.SQLSetRunColumn(k.column)
+		if err != nil {
+			log.Printf("[flush] ERROR %s run=%s: %v", k.column, k.runID[:8], err)
+			continue
+		}
+		if _, err := db.Exec(updateSQL, count, k.runID); err != nil {
 			log.Printf("[flush] ERROR %s run=%s: %v", k.column, k.runID[:8], err)
 		}
 	}
@@ -168,12 +174,12 @@ func (db *DB) processForkOp(targetRunID string, op walForkOp) error {
 	log.Printf("[fork] starting copy run=%s parent=%s maxStep=%d", targetRunID[:8], op.ParentRunID[:8], op.MaxStep)
 
 	var maxStep int
-	if err := db.QueryRow("SELECT COALESCE(MAX(step), -1) FROM run_steps WHERE run_id = ?", op.ParentRunID).Scan(&maxStep); err != nil {
+	if err := db.QueryRow(db.SQL(SQLMaxParentStep), op.ParentRunID).Scan(&maxStep); err != nil {
 		return fmt.Errorf("query parent max step: %w", err)
 	}
 	if op.MaxStep > maxStep {
 		msg := fmt.Sprintf("invalid fork_step %d: parent run has max step %d", op.MaxStep, maxStep)
-		_, _ = db.Exec("UPDATE runs SET state = 'failed', notes = ?, updated_at = current_timestamp WHERE id = ?", msg, targetRunID)
+		_, _ = db.Exec(db.SQL(SQLMarkRunFailed), msg, targetRunID)
 		return fmt.Errorf("%s", msg)
 	}
 
@@ -181,8 +187,9 @@ func (db *DB) processForkOp(targetRunID string, op walForkOp) error {
 	offset := 0
 	totalScalars := 0
 	for {
+		// Agent: 父 run 标量拷贝语句按编号取。
 		rows, err := db.Query(
-			"SELECT step, key, value, x_step FROM history_scalars WHERE run_id = ? AND step <= ? ORDER BY step, key LIMIT ? OFFSET ?",
+			db.SQL(SQLSelectParentScalars),
 			op.ParentRunID, op.MaxStep, txChunkSize, offset,
 		)
 		if err != nil {
@@ -220,7 +227,7 @@ func (db *DB) processForkOp(targetRunID string, op walForkOp) error {
 	totalHistograms := 0
 	for {
 		rows, err := db.Query(
-			"SELECT step, key, x_step, bins, vals FROM history_histograms WHERE run_id = ? AND step <= ? ORDER BY step, key LIMIT ? OFFSET ?",
+			db.SQL(SQLSelectParentHists),
 			op.ParentRunID, op.MaxStep, txChunkSize, offset,
 		)
 		if err != nil {
@@ -254,19 +261,20 @@ func (db *DB) processForkOp(targetRunID string, op walForkOp) error {
 	}
 
 	// Copy run_keys (small, single operation)
-	if _, err := db.Exec(
-		"INSERT OR IGNORE INTO run_keys (run_id, key) SELECT ?, key FROM run_keys WHERE run_id = ?",
-		targetRunID, op.ParentRunID,
-	); err != nil {
+	if _, err := db.Exec(db.SQL(SQLCopyRunKeys), targetRunID, op.ParentRunID); err != nil {
 		return fmt.Errorf("copy run_keys: %w", err)
 	}
 
 	// Update history_line_count
 	var count int
-	if err := db.QueryRow("SELECT COUNT(*) FROM run_steps WHERE run_id = ?", targetRunID).Scan(&count); err != nil {
+	if err := db.QueryRow(db.SQL(SQLCountRunSteps), targetRunID).Scan(&count); err != nil {
 		return fmt.Errorf("count run_steps: %w", err)
 	}
-	if _, err := db.Exec("UPDATE runs SET history_line_count = ?, updated_at = current_timestamp WHERE id = ?", count, targetRunID); err != nil {
+	setCount, err := db.SQLSetRunColumn("history_line_count")
+	if err != nil {
+		return err
+	}
+	if _, err := db.Exec(setCount, count, targetRunID); err != nil {
 		return fmt.Errorf("update history_line_count: %w", err)
 	}
 

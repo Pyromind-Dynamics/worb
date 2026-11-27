@@ -78,6 +78,9 @@ type WAL struct {
 	softSize int64
 	pos      int64
 	dataDir  string
+	// Agent: 本实例专用路径，文件名含 APP_ENV 与 Pod 序号，多副本不共读一份 wal.ndjson。
+	ndjsonPath string
+	posPath    string
 
 	flushNow  chan chan struct{}
 	done      chan struct{}
@@ -85,9 +88,15 @@ type WAL struct {
 	closed    atomic.Bool
 }
 
+// newWAL 打开本实例的 WAL 文件。文件名带 APP_ENV 与 StatefulSet 序号，只读写自己的内容。
+// newWAL opens this instance's WAL files. Names include APP_ENV and the StatefulSet ordinal so pods do not read each other.
 func newWAL(dataDir string) (*WAL, error) {
-	walPath := filepath.Join(dataDir, "wal.ndjson")
-	f, err := os.OpenFile(walPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	// Agent: 打开前先算出本实例文件名，读写和 compact 都只用这一对路径。
+	ndjsonPath, posPath, err := walInstancePaths(dataDir)
+	if err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(ndjsonPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("open wal: %w", err)
 	}
@@ -98,20 +107,30 @@ func newWAL(dataDir string) (*WAL, error) {
 		return nil, fmt.Errorf("stat wal: %w", err)
 	}
 
-	pos := readPosFile(filepath.Join(dataDir, "wal.pos"))
+	// Agent: 进度文件也带同一前缀，避免 prod/pre 或其它 Pod 覆盖 pos。
+	pos := readPosFile(posPath)
 	if pos > info.Size() {
 		pos = 0
 	}
 
 	w := &WAL{
-		file:     f,
-		size:     info.Size(),
-		maxSize:  walMaxSize,
-		softSize: walSoftSize,
-		pos:      pos,
-		dataDir:  dataDir,
-		flushNow: make(chan chan struct{}, 1),
-		done:     make(chan struct{}),
+		file:       f,
+		size:       info.Size(),
+		maxSize:    walMaxSize,
+		softSize:   walSoftSize,
+		pos:        pos,
+		dataDir:    dataDir,
+		ndjsonPath: ndjsonPath,
+		posPath:    posPath,
+		flushNow:   make(chan chan struct{}, 1),
+		done:       make(chan struct{}),
+	}
+
+	log.Printf("[wal] instance file=%s pos=%s", filepath.Base(ndjsonPath), filepath.Base(posPath))
+	// Agent: 升级后不再消费无前缀文件，避免再次读到别人写下的内容。
+	legacy := filepath.Join(dataDir, "wal.ndjson")
+	if _, err := os.Stat(legacy); err == nil && legacy != ndjsonPath {
+		log.Printf("[wal] ignoring unprefixed wal.ndjson; this instance uses %s", filepath.Base(ndjsonPath))
 	}
 
 	return w, nil
@@ -169,8 +188,8 @@ func (w *WAL) fsyncLoop() {
 }
 
 func (w *WAL) readerLoop(db *DB) {
-	walPath := filepath.Join(w.dataDir, "wal.ndjson")
-	rf, err := os.Open(walPath)
+	// Agent: 只打开本实例 ndjson，不扫描目录里其它环境/序号的 WAL。
+	rf, err := os.Open(w.ndjsonPath)
 	if err != nil {
 		log.Printf("[wal] ERROR opening read handle: %v", err)
 		return
@@ -275,7 +294,7 @@ func (w *WAL) readerLoop(db *DB) {
 			}
 			if time.Since(lastCompact) >= 30*time.Second {
 				w.maybeCompact(rf)
-				rf, _ = os.Open(walPath)
+				rf, _ = os.Open(w.ndjsonPath)
 				rf.Seek(w.pos, io.SeekStart)
 				scanner = newScanner()
 				lastCompact = time.Now()
@@ -379,8 +398,68 @@ func (w *WAL) close() {
 }
 
 func (w *WAL) savePos() {
-	posPath := filepath.Join(w.dataDir, "wal.pos")
-	os.WriteFile(posPath, []byte(strconv.FormatInt(w.pos, 10)), 0644)
+	// Agent: pos 与 ndjson 共用前缀，多 Pod 不会抢同一个 wal.pos。
+	os.WriteFile(w.posPath, []byte(strconv.FormatInt(w.pos, 10)), 0644)
+}
+
+// walInstancePaths 拼出本进程专用的 ndjson 与 pos 路径：{APP_ENV}-{ordinal}-wal.ndjson。
+// walInstancePaths builds this process's ndjson and pos paths: {APP_ENV}-{ordinal}-wal.ndjson.
+func walInstancePaths(dataDir string) (ndjsonPath, posPath string, err error) {
+	// Agent: 前缀 1 是环境，前缀 2 是 Pod 序号，中间用 - 拼接后再接到原文件名。
+	prefix, err := walFilePrefix()
+	if err != nil {
+		return "", "", err
+	}
+	return filepath.Join(dataDir, prefix+"-wal.ndjson"), filepath.Join(dataDir, prefix+"-wal.pos"), nil
+}
+
+// walFilePrefix 把 APP_ENV 与 Pod 序号拼成 WAL 文件名前缀。
+// walFilePrefix joins APP_ENV and the pod ordinal into the WAL filename prefix.
+func walFilePrefix() (string, error) {
+	env, err := walAppEnvPrefix()
+	if err != nil {
+		return "", err
+	}
+	// Agent: 例 prod-0、pre-1；本机无配置时是 local-0。
+	return env + "-" + walPodOrdinal(), nil
+}
+
+// walAppEnvPrefix 读取 APP_ENV 作为前缀 1。生产 prod、预发 pre；未设置时用 local。
+// walAppEnvPrefix reads APP_ENV as prefix 1. Use prod/pre in cluster; local when unset.
+func walAppEnvPrefix() (string, error) {
+	// Agent: STS 注入 APP_ENV；空值不再落到共用的 wal.ndjson。
+	raw := strings.TrimSpace(os.Getenv("APP_ENV"))
+	if raw == "" {
+		return "local", nil
+	}
+	// Agent: 前缀会拼进路径，只允许字母数字、下划线和短横，避免写出 dataDir 之外。
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' {
+			continue
+		}
+		return "", fmt.Errorf("APP_ENV is not a safe WAL file prefix")
+	}
+	return raw, nil
+}
+
+// walPodOrdinal 从 StatefulSet 的 Pod 名取出序号作为前缀 2。K8s 把 HOSTNAME 设成 {name}-{ordinal}。
+// walPodOrdinal reads the StatefulSet ordinal as prefix 2. Kubernetes sets HOSTNAME to {name}-{ordinal}.
+func walPodOrdinal() string {
+	// Agent: 与 filecloud.ordinalZero 同一套 HOSTNAME 规则，不另引入环境变量。
+	host := os.Getenv("HOSTNAME")
+	if host == "" {
+		host, _ = os.Hostname()
+	}
+	i := strings.LastIndex(host, "-")
+	if i < 0 || i == len(host)-1 {
+		return "0"
+	}
+	n, err := strconv.Atoi(host[i+1:])
+	if err != nil || n < 0 {
+		return "0"
+	}
+	return strconv.Itoa(n)
 }
 
 func readPosFile(path string) int64 {
@@ -403,7 +482,8 @@ func (w *WAL) maybeCompact(rf *os.File) {
 		return
 	}
 
-	walPath := filepath.Join(w.dataDir, "wal.ndjson")
+	// Agent: compact 只改写本实例文件，临时文件也带前缀以免并发 rename。
+	walPath := w.ndjsonPath
 	tmpPath := walPath + ".tmp"
 
 	src, err := os.Open(walPath)

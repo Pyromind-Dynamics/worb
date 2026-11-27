@@ -1,0 +1,32 @@
+修改规范
+1. 修改的每行代码都需要注释，来自Agent的修改
+2. 代码需要符合当前项目的架构设计，要尽量实现高内聚低耦合
+3. 每个方法都需要有中英双语注释
+4. 代码需要考虑性能指标
+5. 每次修改代码，都需要在 worb修改记录.md 文件中追加修改记录
+6. 每次修改时，如果有逻辑问题，不要自动帮我决策，需要停止下来询问获取最终答案后才可执行
+7. 代码需要符合安全规范，不能有漏洞，敏感字段不能输出到日志中，对外服务功能访问都需要有身份认证（特例可以除外，但需明确特例）
+
+## OSS 权限
+
+`OBJECT_STORE=oss` 时，代码实际发出的 OSS 操作只有下面这些。RAM 按这个范围授权。代码不调用 `GetBucketInfo`，也不调用列举对象。
+
+| 代码调用 | 发生时机 | 需要的权限 |
+|---|---|---|
+| `PutObject` | 上传文件，以及启动时写入探测对象 | `oss:PutObject` |
+| `GetObject` | 启动时读回探测对象。用户打开 302 或 `directUrl` 时也由 OSS 按这个权限鉴权 | `oss:GetObject` |
+| `DeleteObject` | 删除对象，以及启动时删除探测对象 | `oss:DeleteObject` |
+
+启动对内网地址和公网地址分别依次执行这三项。任一地址少一项就不启动。代码不调用 `HeadBucket`、`GetBucketInfo` 和列举对象。
+
+内网使用虚拟主机风格：主机名是 `{bucket}.{object_store_endpoint 的主机}`，路径只有对象键。公网自定义域名保持 `object_store_endpoint_pub` 的主机名，路径也只有对象键。不使用 path style。
+
+## 启动日志
+
+gRPC 启动检查必须打出三种结果之一，并且不包含 wandb key、证书正文、数据库密码和 OSS 密钥。
+
+| 结果 | 日志 | 进程 |
+|---|---|---|
+| 校验通过 | `query_user_by_token startup check passed` | 继续启动 |
+| 没有校验 | `query_user_by_token startup check skipped` | 退出。地址为空、证书不满足，或连接对象没有建成，调用没有发出 |
+| 校验失败 | `query_user_by_token startup check failed` | 退出。拨号失败、超时、传输错误或没有回包 |

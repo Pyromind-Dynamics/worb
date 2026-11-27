@@ -3,7 +3,6 @@ package store
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
 )
 
 func (db *DB) InsertHistory(runID string, step int, data json.RawMessage) error {
@@ -42,6 +41,25 @@ type parsedHistogram struct {
 	vals  string
 }
 
+// wandbHistoryStep 从历史 JSON 取出客户端传入的训练 step。优先 `_step`（wandb.log(step=)），其次 `step`；都没有时用 file_stream 行号。
+// wandbHistoryStep reads the client training step from a history line. It prefers `_step` (wandb.log(step=)), then `step`, else the file_stream offset.
+func wandbHistoryStep(obj map[string]json.RawMessage, fallback int) (int, *float64) {
+	// Agent: wandb 把 run.log(..., step=N) 写成 `_step`，不是 file_stream 的行偏移。
+	for _, key := range []string{"_step", "step"} {
+		raw, ok := obj[key]
+		if !ok {
+			continue
+		}
+		var v float64
+		if json.Unmarshal(raw, &v) != nil {
+			continue
+		}
+		x := v
+		return int(v), &x
+	}
+	return fallback, nil
+}
+
 func parseHistoryRows(rows []struct {
 	Step int
 	Data json.RawMessage
@@ -55,13 +73,8 @@ func parseHistoryRows(rows []struct {
 			continue
 		}
 
-		var xStep *float64
-		if raw, ok := obj["step"]; ok {
-			var v float64
-			if json.Unmarshal(raw, &v) == nil {
-				xStep = &v
-			}
-		}
+		// Agent: 主键 step 与图表 x 轴都用 wandb 传入的 step，避免 /runs/ 从 0 起画。
+		step, xStep := wandbHistoryStep(obj, r.Step)
 
 		for key, raw := range obj {
 			if len(key) > 0 && key[0] == '_' || key == "step" {
@@ -69,7 +82,7 @@ func parseHistoryRows(rows []struct {
 			}
 			var v float64
 			if json.Unmarshal(raw, &v) == nil {
-				scalars = append(scalars, parsedScalar{step: r.Step, key: key, value: v, xStep: xStep})
+				scalars = append(scalars, parsedScalar{step: step, key: key, value: v, xStep: xStep})
 				continue
 			}
 			var histObj struct {
@@ -80,7 +93,7 @@ func parseHistoryRows(rows []struct {
 			if json.Unmarshal(raw, &histObj) == nil && histObj.Type == "histogram" && len(histObj.Bins) >= 2 && len(histObj.Values) > 0 {
 				binsJSON, _ := json.Marshal(histObj.Bins)
 				valsJSON, _ := json.Marshal(histObj.Values)
-				histograms = append(histograms, parsedHistogram{step: r.Step, key: key, xStep: xStep, bins: string(binsJSON), vals: string(valsJSON)})
+				histograms = append(histograms, parsedHistogram{step: step, key: key, xStep: xStep, bins: string(binsJSON), vals: string(valsJSON)})
 			}
 		}
 	}
@@ -107,42 +120,24 @@ func (db *DB) flushScalars(runID string, scalars []parsedScalar) error {
 			return fmt.Errorf("begin tx: %w", err)
 		}
 		txStepSet := map[int]struct{}{}
-		for i := 0; i < len(txSlice); i += multiRowSize {
-			end := i + multiRowSize
-			if end > len(txSlice) {
-				end = len(txSlice)
-			}
-			chunk := txSlice[i:end]
-			query := "INSERT OR IGNORE INTO history_scalars (run_id, step, key, value, x_step) VALUES "
-			args := make([]interface{}, 0, len(chunk)*5)
-			for j, s := range chunk {
-				if j > 0 {
-					query += ","
-				}
-				query += "(?,?,?,?,?)"
-				args = append(args, runID, s.step, s.key, s.value, s.xStep)
-				keySet[s.key] = struct{}{}
-				txStepSet[s.step] = struct{}{}
-			}
-			if _, err := tx.Exec(query, args...); err != nil {
-				tx.Rollback()
-				return fmt.Errorf("insert scalars: %w", err)
-			}
+		// Agent: 批量插入按 100 行和包大小拆开，语句由 sql_manager 按引擎改写。
+		args := make([]any, 0, len(txSlice)*5)
+		for _, s := range txSlice {
+			args = append(args, runID, s.step, s.key, s.value, s.xStep)
+			keySet[s.key] = struct{}{}
+			txStepSet[s.step] = struct{}{}
+		}
+		if err := db.execIgnoreBatches(tx, SQLInsertScalarsPrefix, "(?,?,?,?,?)", 5, args); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("insert scalars: %w", err)
 		}
 
 		if len(txStepSet) > 0 {
-			query := "INSERT OR IGNORE INTO run_steps (run_id, step) VALUES "
-			args := make([]interface{}, 0, len(txStepSet)*2)
-			first := true
+			stepArgs := make([]any, 0, len(txStepSet)*2)
 			for step := range txStepSet {
-				if !first {
-					query += ","
-				}
-				query += "(?,?)"
-				args = append(args, runID, step)
-				first = false
+				stepArgs = append(stepArgs, runID, step)
 			}
-			if _, err := tx.Exec(query, args...); err != nil {
+			if err := db.execIgnoreBatches(tx, SQLInsertRunStepsPrefix, "(?,?)", 2, stepArgs); err != nil {
 				tx.Rollback()
 				return fmt.Errorf("insert run_steps: %w", err)
 			}
@@ -156,19 +151,21 @@ func (db *DB) flushScalars(runID string, scalars []parsedScalar) error {
 
 	// Insert new keys into run_keys (small, separate tx)
 	if len(keySet) > 0 {
-		query := "INSERT OR IGNORE INTO run_keys (run_id, key) VALUES "
-		args := make([]interface{}, 0, len(keySet)*2)
-		first := true
-		for k := range keySet {
-			if !first {
-				query += ","
-			}
-			query += "(?,?)"
-			args = append(args, runID, k)
-			first = false
+		// Agent: 指标名批量写入，超包时由 execIgnoreBatches 拆开。
+		tx, err := db.Begin()
+		if err != nil {
+			return fmt.Errorf("begin keys tx: %w", err)
 		}
-		if _, err := db.Exec(query, args...); err != nil {
+		args := make([]any, 0, len(keySet)*2)
+		for k := range keySet {
+			args = append(args, runID, k)
+		}
+		if err := db.execIgnoreBatches(tx, SQLInsertRunKeysPrefix, "(?,?)", 2, args); err != nil {
+			tx.Rollback()
 			return fmt.Errorf("insert run_keys: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit run_keys: %w", err)
 		}
 	}
 
@@ -187,22 +184,18 @@ func (db *DB) flushHistograms(runID string, histograms []parsedHistogram) error 
 		if err != nil {
 			return fmt.Errorf("begin tx: %w", err)
 		}
+		// Agent: 先按 100 行切开，execIgnoreBatches 再按包大小拆小。
 		for i := 0; i < len(txSlice); i += multiRowSize {
 			end := i + multiRowSize
 			if end > len(txSlice) {
 				end = len(txSlice)
 			}
 			chunk := txSlice[i:end]
-			query := "INSERT OR IGNORE INTO history_histograms (run_id, step, key, x_step, bins, vals) VALUES "
-			args := make([]interface{}, 0, len(chunk)*6)
-			for j, hh := range chunk {
-				if j > 0 {
-					query += ","
-				}
-				query += "(?,?,?,?,?,?)"
+			args := make([]any, 0, len(chunk)*6)
+			for _, hh := range chunk {
 				args = append(args, runID, hh.step, hh.key, hh.xStep, hh.bins, hh.vals)
 			}
-			if _, err := tx.Exec(query, args...); err != nil {
+			if err := db.execIgnoreBatches(tx, SQLInsertHistsPrefix, "(?,?,?,?,?,?)", 6, args); err != nil {
 				tx.Rollback()
 				return fmt.Errorf("insert histograms: %w", err)
 			}
@@ -225,7 +218,8 @@ func (db *DB) flushEvents(runID string, events []eventItem) error {
 		if err != nil {
 			return fmt.Errorf("begin tx: %w", err)
 		}
-		stmt, err := tx.Prepare("INSERT INTO system_events (run_id, line_num, data) VALUES (?, ?, ?)")
+		// Agent: 准备语句也走当前引擎的写法。
+		stmt, err := tx.Prepare(db.SQL(SQLInsertSysEvent))
 		if err != nil {
 			tx.Rollback()
 			return fmt.Errorf("prepare events: %w", err)
@@ -256,7 +250,8 @@ func (db *DB) flushLogs(runID string, logs []logItem) error {
 		if err != nil {
 			return fmt.Errorf("begin tx: %w", err)
 		}
-		stmt, err := tx.Prepare("INSERT INTO console_logs (run_id, line_num, line, stream) VALUES (?, ?, ?, 'stdout')")
+		// Agent: 准备语句也走当前引擎的写法。
+		stmt, err := tx.Prepare(db.SQL(SQLInsertConsLog))
 		if err != nil {
 			tx.Rollback()
 			return fmt.Errorf("prepare logs: %w", err)
@@ -277,7 +272,7 @@ func (db *DB) flushLogs(runID string, logs []logItem) error {
 }
 
 func (db *DB) GetHistoryKeys(runID string) ([]string, error) {
-	rows, err := db.Query("SELECT key FROM run_keys WHERE run_id = ? ORDER BY key", runID)
+	rows, err := db.Query(db.SQL(SQLSelectRunKeys), runID)
 	if err != nil {
 		return nil, err
 	}
@@ -294,31 +289,28 @@ func (db *DB) GetHistoryKeys(runID string) ([]string, error) {
 	return keys, rows.Err()
 }
 
+// isSQLiteBusy 同时识别 SQLite 锁和 MySQL 的死锁、锁等待超时。
+// isSQLiteBusy reports SQLite locks and MySQL deadlock or lock-wait timeout.
 func isSQLiteBusy(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "SQLITE_BUSY")
+	// Agent: MySQL 1213/1205 与 SQLITE_BUSY 一样走回退查询。
+	return isBusyLock(err)
 }
 
 func (db *DB) ensureRunSteps(runID string) error {
 	var historyLineCount int
-	if err := db.QueryRow("SELECT history_line_count FROM runs WHERE id = ?", runID).Scan(&historyLineCount); err != nil {
+	if err := db.QueryRow(db.SQL(SQLSelectHistoryLineCount), runID).Scan(&historyLineCount); err != nil {
 		return err
 	}
 
 	var stepCount int
-	if err := db.QueryRow("SELECT COUNT(*) FROM run_steps WHERE run_id = ?", runID).Scan(&stepCount); err != nil {
+	if err := db.QueryRow(db.SQL(SQLCountRunSteps), runID).Scan(&stepCount); err != nil {
 		return err
 	}
 	if stepCount > 0 || historyLineCount == 0 {
 		return nil
 	}
 
-	if _, err := db.Exec(`
-		INSERT OR IGNORE INTO run_steps (run_id, step)
-		SELECT run_id, step
-		FROM history_scalars
-		WHERE run_id = ?
-		GROUP BY run_id, step
-	`, runID); err != nil {
+	if _, err := db.Exec(db.SQL(SQLBackfillRunSteps), runID); err != nil {
 		if isSQLiteBusy(err) {
 			return err
 		}
@@ -326,10 +318,10 @@ func (db *DB) ensureRunSteps(runID string) error {
 	}
 
 	var count int
-	if err := db.QueryRow("SELECT COUNT(*) FROM run_steps WHERE run_id = ?", runID).Scan(&count); err != nil {
+	if err := db.QueryRow(db.SQL(SQLCountRunSteps), runID).Scan(&count); err != nil {
 		return err
 	}
-	if _, err := db.Exec("UPDATE runs SET history_line_count = ? WHERE id = ?", count, runID); err != nil {
+	if _, err := db.Exec(db.SQL(SQLSetHistoryLineCount), count, runID); err != nil {
 		return err
 	}
 	return nil
@@ -340,7 +332,7 @@ func (db *DB) countRunSteps(runID string, xMin, xMax *float64) (int, error) {
 		if !isSQLiteBusy(err) {
 			return 0, err
 		}
-		query := "SELECT COUNT(DISTINCT step) FROM history_scalars WHERE run_id = ?"
+		query := db.SQL(SQLCountDistinctSteps)
 		args := []interface{}{runID}
 		if xMin != nil {
 			query += " AND step >= ?"
@@ -358,13 +350,13 @@ func (db *DB) countRunSteps(runID string, xMin, xMax *float64) (int, error) {
 	}
 	if xMin == nil && xMax == nil {
 		var count int
-		if err := db.QueryRow("SELECT history_line_count FROM runs WHERE id = ?", runID).Scan(&count); err != nil {
+		if err := db.QueryRow(db.SQL(SQLSelectHistoryLineCount), runID).Scan(&count); err != nil {
 			return 0, err
 		}
 		return count, nil
 	}
 
-	query := "SELECT COUNT(*) FROM run_steps WHERE run_id = ?"
+	query := db.SQL(SQLCountRunSteps)
 	args := []interface{}{runID}
 	if xMin != nil {
 		query += " AND step >= ?"
@@ -432,9 +424,8 @@ func (db *DB) streamKeyScalars(runID, key string, needsBucket bool, bucketSize i
 	}
 
 	if !needsBucket {
-		query := fmt.Sprintf(
-			"SELECT COALESCE(x_step, step), value, step FROM history_scalars WHERE run_id = ? AND key = ?%s ORDER BY step",
-			stepFilter)
+		// Agent: 按编号取语句，再填入 step 过滤。
+		query := fmt.Sprintf(db.SQL(SQLSelectScalarsByKey), stepFilter)
 		rows, err := db.Query(query, args...)
 		if err != nil {
 			return err
@@ -454,9 +445,8 @@ func (db *DB) streamKeyScalars(runID, key string, needsBucket bool, bucketSize i
 		return rows.Err()
 	}
 
-	query := fmt.Sprintf(
-		"SELECT AVG(COALESCE(x_step, step)), AVG(value), MIN(value), MAX(value) FROM history_scalars WHERE run_id = ? AND key = ?%s GROUP BY step / %d ORDER BY step / %d",
-		stepFilter, bucketSize, bucketSize)
+	// Agent: 分桶大小写入 DIV/除法模板。
+	query := fmt.Sprintf(db.SQLScalarsBucket(bucketSize), stepFilter)
 	rows, err := db.Query(query, args...)
 	if err != nil {
 		return err
@@ -492,11 +482,7 @@ func (db *DB) StreamProjectHistoryScalars(projectID string, maxPoints int, emit 
 		id   string
 		name string
 	}
-	infoRows, err := db.Query(`
-		SELECT r.id, COALESCE(NULLIF(r.display_name, ''), r.name)
-		FROM runs r
-		WHERE r.project_id = ? AND r.deleted_at IS NULL
-		ORDER BY r.created_at`, projectID)
+	infoRows, err := db.Query(db.SQL(SQLSelectProjectRuns), projectID)
 	if err != nil {
 		return err
 	}
@@ -515,7 +501,7 @@ func (db *DB) StreamProjectHistoryScalars(projectID string, maxPoints int, emit 
 	bucketSize := 1
 	if maxPoints > 0 {
 		var maxRunRows int
-		db.QueryRow(`SELECT COALESCE(MAX(history_line_count), 0) FROM runs WHERE project_id = ? AND deleted_at IS NULL`, projectID).Scan(&maxRunRows)
+		db.QueryRow(db.SQL(SQLMaxHistoryLineCount), projectID).Scan(&maxRunRows)
 		if maxRunRows > maxPoints {
 			needsBucket = true
 			bucketSize = maxRunRows / maxPoints
@@ -524,10 +510,7 @@ func (db *DB) StreamProjectHistoryScalars(projectID string, maxPoints int, emit 
 
 	for _, ri := range runs {
 		if !needsBucket {
-			rows, err := db.Query(`
-				SELECT key, COALESCE(x_step, step) as x, value, step
-				FROM history_scalars WHERE run_id = ?
-				ORDER BY step, key`, ri.id)
+			rows, err := db.Query(db.SQL(SQLSelectScalarsByRun), ri.id)
 			if err != nil {
 				return err
 			}
@@ -550,11 +533,7 @@ func (db *DB) StreamProjectHistoryScalars(projectID string, maxPoints int, emit 
 			}
 			rows.Close()
 		} else {
-			rows, err := db.Query(fmt.Sprintf(`
-				SELECT key, AVG(COALESCE(x_step, step)), AVG(value), MIN(value), MAX(value)
-				FROM history_scalars WHERE run_id = ?
-				GROUP BY key, step / %d
-				ORDER BY step / %d, key`, bucketSize, bucketSize), ri.id)
+			rows, err := db.Query(db.SQLProjectScalarsBucket(bucketSize), ri.id)
 			if err != nil {
 				return err
 			}
@@ -589,7 +568,7 @@ type HistogramPoint struct {
 }
 
 func (db *DB) StreamHistoryHistograms(runID string, emit func(HistogramPoint) error) error {
-	rows, err := db.Query("SELECT step, key, x_step, bins, vals FROM history_histograms WHERE run_id = ? ORDER BY step", runID)
+	rows, err := db.Query(db.SQL(SQLSelectHistogramsByRun), runID)
 	if err != nil {
 		return err
 	}
@@ -621,7 +600,7 @@ func (db *DB) StreamHistoryHistograms(runID string, emit func(HistogramPoint) er
 }
 
 func (db *DB) UpdateRunSummary(runID string, summary json.RawMessage) error {
-	_, err := db.Exec("UPDATE runs SET summary = ?, updated_at = current_timestamp WHERE id = ?", string(summary), runID)
+	_, err := db.Exec(db.SQL(SQLUpdateRunSummary), string(summary), runID)
 	return err
 }
 
@@ -670,7 +649,7 @@ func (db *DB) InsertConsoleLogBatch(runID string, rows []struct {
 }
 
 func (db *DB) GetConsoleLogs(runID string) ([]string, error) {
-	rows, err := db.Query("SELECT line FROM console_logs WHERE run_id = ? ORDER BY line_num", runID)
+	rows, err := db.Query(db.SQL(SQLSelectConsoleLines), runID)
 	if err != nil {
 		return nil, err
 	}

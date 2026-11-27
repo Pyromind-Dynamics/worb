@@ -189,6 +189,29 @@ ORDER BY step LIMIT 20</textarea>
         document.getElementById('chart-settings').classList.toggle('open');
     }
 
+    // xAxisMinFromPoints 只给出 x 轴左端：数据里的最小 step。最大值仍交给 Chart.js 刻度和 suggestedMax。
+    // xAxisMinFromPoints returns only the x-axis left edge (min logged step). Max still follows Chart.js ticks and suggestedMax.
+    function xAxisMinFromPoints(points) {
+        // Agent: 钉死 min 后 bounds:ticks 不会再把左端 floor 成 step-1；不设 max。
+        let m = Infinity;
+        for (const p of points) {
+            if (p && p.step < m) m = p.step;
+        }
+        return Number.isFinite(m) ? m : undefined;
+    }
+
+    // xAxisMinFromXY 从 {x,y} 点里取最小 x，给放大图用。
+    // xAxisMinFromXY reads the smallest x from {x,y} points for the expanded chart.
+    function xAxisMinFromXY(datasets) {
+        let m = Infinity;
+        for (const ds of datasets || []) {
+            for (const p of ds.data || []) {
+                if (p && p.x < m) m = p.x;
+            }
+        }
+        return Number.isFinite(m) ? m : undefined;
+    }
+
     // Smoothing algorithms
     function smoothEMA(data, param) {
         if (param <= 0 || data.length < 2) return data;
@@ -538,9 +561,14 @@ ORDER BY step LIMIT 20</textarea>
         } : (() => {
             const exXType = chartSettings.xLog ? 'logarithmic' : 'linear';
             const exYType = chartSettings.yLog ? 'logarithmic' : 'linear';
-            const exXScale = { type: exXType, title: { display: true, text: 'step', color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { color: '#30363d' } };
+            // Agent: 放大图只钉 min；不设 bounds:data，右端仍按原来的 ticks / suggestedMax。
+            const exXScale = { type: exXType, beginAtZero: false, title: { display: true, text: 'step', color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { color: '#30363d' } };
             const exYScale = { type: exYType, title: { display: true, text: key, color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { color: '#30363d' } };
             if (chartSettings.xMin !== '') exXScale.min = Number(chartSettings.xMin);
+            else {
+                const dataMin = xAxisMinFromXY(data.datasets);
+                if (dataMin !== undefined) exXScale.min = dataMin;
+            }
             if (chartSettings.xMax !== '') exXScale.max = Number(chartSettings.xMax);
             if (chartSettings.yMin !== '') exYScale.min = Number(chartSettings.yMin);
             if (chartSettings.yMax !== '') exYScale.max = Number(chartSettings.yMax);
@@ -916,9 +944,14 @@ ORDER BY step LIMIT 20</textarea>
                 }
                 const xType = chartSettings.xLog ? 'logarithmic' : 'linear';
                 const yType = chartSettings.yLog ? 'logarithmic' : 'linear';
-                const xScale = { type: xType, ...(loadingHistory && runHistoryLineCount > 0 ? { suggestedMax: runHistoryLineCount } : {}), title: { display: true, text: 'step', color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { color: '#30363d' } };
+                // Agent: 只设 min 为数据最小 step；suggestedMax 和 ticks 取整仍管右端，与改前一致。
+                const xScale = { type: xType, beginAtZero: false, ...(loadingHistory && runHistoryLineCount > 0 ? { suggestedMax: runHistoryLineCount } : {}), title: { display: true, text: 'step', color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { color: '#30363d' } };
                 const yScale = { type: yType, title: { display: true, text: key, color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { color: '#30363d' } };
                 if (chartSettings.xMin !== '') xScale.min = Number(chartSettings.xMin);
+                else {
+                    const dataMin = xAxisMinFromPoints(points);
+                    if (dataMin !== undefined) xScale.min = dataMin;
+                }
                 if (chartSettings.xMax !== '') xScale.max = Number(chartSettings.xMax);
                 if (chartSettings.yMin !== '') yScale.min = Number(chartSettings.yMin);
                 if (chartSettings.yMax !== '') yScale.max = Number(chartSettings.yMax);
@@ -1153,6 +1186,12 @@ ORDER BY step LIMIT 20</textarea>
                                 xScale.suggestedMax = runHistoryLineCount;
                             } else {
                                 delete xScale.suggestedMax;
+                            }
+                            // Agent: 流式刷新时只更新左端 min，不写 max。
+                            if (chartSettings.xMin !== '') xScale.min = Number(chartSettings.xMin);
+                            else {
+                                const dataMin = xAxisMinFromPoints(points);
+                                if (dataMin !== undefined) xScale.min = dataMin;
                             }
                             chart.update('none');
                         }

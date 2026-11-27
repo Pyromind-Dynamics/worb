@@ -9,6 +9,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -16,20 +17,43 @@ import (
 	"github.com/sarna/worb/internal/store"
 )
 
-// UpsertBucket is the resolver for the upsertBucket field.
+// Files 返回 artifact 尚未软删的文件。有 object_key 时 directUrl 是现签地址。
+// Files returns artifact files that are not soft-deleted. directUrl is signed when an object key exists.
+func (r *artifactResolver) Files(ctx context.Context, obj *Artifact) (*FileReadConnection, error) {
+	// Agent: 创建时的 manifest directUrl 不走这里，仍是 PUT 地址。
+	if obj == nil || obj.ID == "" {
+		return emptyFileRead(), nil
+	}
+	files, err := r.Store.ListVisibleArtifactFiles(obj.ID)
+	if err != nil {
+		return nil, err
+	}
+	return r.readFiles(ctx, files), nil
+}
+
+// URL 返回文件的 upload 路径。upload 参数不改变这个地址。
+// URL returns the file upload path. The upload argument does not change that address.
+func (r *fileReadResolver) URL(ctx context.Context, obj *FileRead, upload *bool) (*string, error) {
+	// Agent: wandb 查询会带 upload。地址始终是 /files/upload/{id}，不改成云端地址。
+	_ = ctx
+	_ = upload
+	if obj == nil {
+		return nil, nil
+	}
+	return obj.URL, nil
+}
+
+// UpsertBucket 创建或更新 run，项目归属使用本次请求的 user_id。
+// UpsertBucket creates or updates a run and assigns it to the request user_id.
 func (r *mutationResolver) UpsertBucket(ctx context.Context, input *UpsertBucketInput, id *string, name *string, entity *string, project *string, config *string, summary *string, state *string, host *string, program *string, commit *string, tags []string, displayName *string, notes *string, groupName *string, jobType *string, sweepName *string, description *string) (*UpsertBucketPayload, error) {
+	// Agent: 调用方传入的 entity 不参与归属。
+	_ = entity
 	if input != nil {
 		if input.ID != nil && id == nil {
 			id = input.ID
 		}
 		if input.Name != nil && name == nil {
 			name = input.Name
-		}
-		if input.Entity != nil && entity == nil {
-			entity = input.Entity
-		}
-		if input.EntityName != nil && entity == nil {
-			entity = input.EntityName
 		}
 		if input.Project != nil && project == nil {
 			project = input.Project
@@ -89,11 +113,8 @@ func (r *mutationResolver) UpsertBucket(ctx context.Context, input *UpsertBucket
 	if name != nil {
 		params.Name = *name
 	}
-	if entity != nil {
-		params.Entity = *entity
-	} else {
-		params.Entity = "local"
-	}
+	// Agent: entity 固定为 Middleware 写入的 user_id，不使用客户端传入的 entity。
+	params.Entity = auth.EntityFromContext(ctx)
 	if project != nil {
 		params.Project = *project
 	} else {
@@ -218,13 +239,15 @@ func (r *mutationResolver) UpsertBucket(ctx context.Context, input *UpsertBucket
 	}, nil
 }
 
-// CreateArtifact is the resolver for the createArtifact field.
+// CreateArtifact 在当前 user_id 下登记 artifact。
+// CreateArtifact records an artifact under the current user_id.
 func (r *mutationResolver) CreateArtifact(ctx context.Context, input CreateArtifactInput) (*CreateArtifactPayload, error) {
 	projectName := "default"
 	if input.ProjectName != nil {
 		projectName = *input.ProjectName
 	}
-	proj, err := r.Store.EnsureProject(input.EntityName, projectName)
+	// Agent: 忽略 input.EntityName，归属取本次请求的 user_id。
+	proj, err := r.Store.EnsureProject(auth.EntityFromContext(ctx), projectName)
 	if err != nil {
 		return nil, err
 	}
@@ -272,12 +295,26 @@ func (r *mutationResolver) CommitArtifact(ctx context.Context, input CommitArtif
 	}, nil
 }
 
-// CreateArtifactManifest is the resolver for the createArtifactManifest field.
+// CreateArtifactManifest 登记 artifact 清单文件，directUrl 仍是 worb 的 PUT 地址。
+// CreateArtifactManifest records the manifest file. directUrl stays the worb PUT address.
 func (r *mutationResolver) CreateArtifactManifest(ctx context.Context, input CreateArtifactManifestInput) (*CreateArtifactManifestPayload, error) {
-	manifestID := uuid.New().String()
-	fileID := uuid.New().String()
+	artifact, err := r.Store.GetArtifact(input.ArtifactID)
+	if err != nil {
+		return nil, fmt.Errorf("find artifact: %w", err)
+	}
+	name, err := store.CleanObjectName(input.Name)
+	if err != nil {
+		return nil, err
+	}
+	// Agent: id 使用 art- 前缀，上传和查表都靠这个前缀。
+	fileID := "art-" + uuid.New().String()
 	uploadURL := fmt.Sprintf("%s/files/upload/%s", GetBaseURL(ctx), fileID)
-
+	// Agent: entity 是 Middleware 写入的 user_id。
+	entity := auth.EntityFromContext(ctx)
+	if err := r.Store.InsertPendingArtifactFile(fileID, artifact.RunID, artifact.ID, name, uploadURL, entity); err != nil {
+		return nil, err
+	}
+	manifestID := uuid.New().String()
 	return &CreateArtifactManifestPayload{
 		ArtifactManifest: &ArtifactManifest{
 			ID: manifestID,
@@ -289,34 +326,49 @@ func (r *mutationResolver) CreateArtifactManifest(ctx context.Context, input Cre
 	}, nil
 }
 
-// CreateArtifactFiles is the resolver for the createArtifactFiles field.
+// CreateArtifactFiles 为 artifact 的每个文件登记 pending 行，上传地址指向 worb。
+// CreateArtifactFiles records a pending row per artifact file. Upload URLs point at worb.
 func (r *mutationResolver) CreateArtifactFiles(ctx context.Context, input CreateArtifactFilesInput) (*CreateArtifactFilesPayload, error) {
+	artifact, err := r.Store.GetArtifact(input.ArtifactID)
+	if err != nil {
+		return nil, fmt.Errorf("find artifact: %w", err)
+	}
+	// Agent: entity 是 Middleware 写入的 user_id。
+	entity := auth.EntityFromContext(ctx)
 	var edges []*FileEdge
 	for _, f := range input.Files {
-		fileID := uuid.New().String()
+		name, err := store.CleanObjectName(f.Name)
+		if err != nil {
+			return nil, err
+		}
+		fileID := "art-" + uuid.New().String()
 		uploadURL := fmt.Sprintf("%s/files/upload/%s", GetBaseURL(ctx), fileID)
+		if err := r.Store.InsertPendingArtifactFile(fileID, artifact.RunID, artifact.ID, name, uploadURL, entity); err != nil {
+			return nil, err
+		}
 		edges = append(edges, &FileEdge{
 			Node: &FileUploadInfo{
 				ID:            fileID,
-				Name:          f.Name,
+				Name:          name,
 				UploadURL:     &uploadURL,
 				UploadHeaders: []string{},
 			},
 		})
 	}
-
 	return &CreateArtifactFilesPayload{
 		Files: &FileConnection{Edges: edges},
 	}, nil
 }
 
-// CreateRunFiles is the resolver for the createRunFiles field.
+// CreateRunFiles 为当前 user_id 下的 run 登记待上传文件。
+// CreateRunFiles registers upload files for a run owned by the current user_id.
 func (r *mutationResolver) CreateRunFiles(ctx context.Context, input CreateRunFilesInput) (*CreateRunFilesPayload, error) {
 	projectName := "default"
 	if input.ProjectName != nil {
 		projectName = *input.ProjectName
 	}
-	proj, err := r.Store.EnsureProject(input.EntityName, projectName)
+	// Agent: 忽略 input.EntityName，归属取本次请求的 user_id。
+	proj, err := r.Store.EnsureProject(auth.EntityFromContext(ctx), projectName)
 	if err != nil {
 		return nil, err
 	}
@@ -326,17 +378,26 @@ func (r *mutationResolver) CreateRunFiles(ctx context.Context, input CreateRunFi
 		return nil, fmt.Errorf("find run: %w", err)
 	}
 
+	// Agent: entity 是 Middleware 写入的 user_id。
+	entity := auth.EntityFromContext(ctx)
 	var files []*FileUploadInfo
 	for _, fname := range input.Files {
-		fileID := uuid.New().String()
+		name, err := store.CleanObjectName(fname)
+		if err != nil {
+			return nil, err
+		}
+		// Agent: run- 前缀同时是主键、本地文件名和选表依据。
+		fileID := "run-" + uuid.New().String()
 		uploadURL := fmt.Sprintf("%s/files/upload/%s", GetBaseURL(ctx), fileID)
+		if err := r.Store.InsertPendingRunFile(fileID, run.ID, name, uploadURL, entity); err != nil {
+			return nil, err
+		}
 		files = append(files, &FileUploadInfo{
 			ID:            fileID,
-			Name:          fname,
+			Name:          name,
 			UploadURL:     &uploadURL,
 			UploadHeaders: []string{},
 		})
-		r.Store.InsertFile(fileID, run.ID, fname, uploadURL)
 	}
 
 	return &CreateRunFilesPayload{
@@ -344,6 +405,37 @@ func (r *mutationResolver) CreateRunFiles(ctx context.Context, input CreateRunFi
 		Files:         files,
 		UploadHeaders: []string{},
 	}, nil
+}
+
+// DeleteFiles 按文件 id 软删，并送进已有的删除队列。
+// DeleteFiles soft-deletes files by id and sends them to the existing delete queue.
+func (r *mutationResolver) DeleteFiles(ctx context.Context, input DeleteFilesInput) (*DeleteFilesPayload, error) {
+	// Agent: 客户端传来的 projectId 是整数。项目主键是字符串，删除只按文件 id。
+	_ = input.ProjectID
+	entity := auth.EntityFromContext(ctx)
+	ids := make([]string, 0, len(input.Files))
+	for _, id := range input.Files {
+		file, err := r.Store.GetStoredFile(id)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				continue
+			}
+			return nil, err
+		}
+		if file.DeletedAt != "" {
+			continue
+		}
+		// Agent: 行上写了别的用户时不删。空 entity 的旧行仍允许这次请求删除。
+		if file.Entity != "" && file.Entity != entity {
+			return nil, fmt.Errorf("file %s is not owned by this user", id)
+		}
+		ids = append(ids, id)
+	}
+	if _, err := r.Store.SoftDeleteStoredFiles(ids); err != nil {
+		return nil, err
+	}
+	ok := true
+	return &DeleteFilesPayload{Success: &ok}, nil
 }
 
 // RunCount is the resolver for the runCount field.
@@ -422,8 +514,10 @@ func (r *projectResolver) Bucket(ctx context.Context, obj *Project, name string,
 	return storeRunToGQL(run), nil
 }
 
-// Viewer is the resolver for the viewer field.
+// Viewer 返回当前 user_id，供客户端作为默认 entity。
+// Viewer returns the current user_id so the client can use it as the default entity.
 func (r *queryResolver) Viewer(ctx context.Context) (*User, error) {
+	// Agent: entity 即 Middleware 保存的 user_id。
 	entity := auth.EntityFromContext(ctx)
 	flags := "{}"
 	return &User{
@@ -438,16 +532,17 @@ func (r *queryResolver) Viewer(ctx context.Context) (*User, error) {
 	}, nil
 }
 
-// Project is the resolver for the project field.
+// Project 按当前 user_id 查找或创建项目。
+// Project finds or creates a project under the current user_id.
 func (r *queryResolver) Project(ctx context.Context, name *string, entityName *string) (*Project, error) {
+	// Agent: 忽略客户端传入的 entityName。
+	_ = entityName
 	projectName := "default"
 	if name != nil {
 		projectName = *name
 	}
-	entity := "local"
-	if entityName != nil {
-		entity = *entityName
-	}
+	// Agent: 按本次请求的 user_id 归属项目。
+	entity := auth.EntityFromContext(ctx)
 
 	proj, err := r.Store.EnsureProject(entity, projectName)
 	if err != nil {
@@ -465,16 +560,17 @@ func (r *queryResolver) Project(ctx context.Context, name *string, entityName *s
 	}, nil
 }
 
-// Model is the resolver for the model field.
+// Model 与 Project 相同，按当前 user_id 查找或创建项目。
+// Model matches Project and finds or creates a project under the current user_id.
 func (r *queryResolver) Model(ctx context.Context, name *string, entityName *string) (*Project, error) {
+	// Agent: 忽略客户端传入的 entityName。
+	_ = entityName
 	projectName := "default"
 	if name != nil {
 		projectName = *name
 	}
-	entity := "local"
-	if entityName != nil {
-		entity = *entityName
-	}
+	// Agent: 按本次请求的 user_id 归属项目。
+	entity := auth.EntityFromContext(ctx)
 
 	proj, err := r.Store.EnsureProject(entity, projectName)
 	if err != nil {
@@ -560,6 +656,55 @@ func (r *runResolver) WandbConfig(ctx context.Context, obj *Run, keys []string) 
 	return &s, nil
 }
 
+// FileCount 返回这个 run 尚未软删的文件数。
+// FileCount returns how many files on this run are not soft-deleted.
+func (r *runResolver) FileCount(ctx context.Context, obj *Run) (*int, error) {
+	// Agent: wandb 用这个数作为文件列表长度。COUNT 按 run_id 统计，不把文件行读进内存。
+	_ = ctx
+	if obj == nil || obj.ID == "" {
+		zero := 0
+		return &zero, nil
+	}
+	n, err := r.Store.CountVisibleRunFiles(obj.ID)
+	if err != nil {
+		return nil, err
+	}
+	return &n, nil
+}
+
+// Files 按 names、pattern 和游标直接查询一页文件。url 固定为 upload 路径，directUrl 在有 object_key 时现签。
+// Files loads one page by names, pattern, and cursor. url stays the upload path, and directUrl is signed when an object key exists.
+func (r *runResolver) Files(ctx context.Context, obj *Run, names []string, after *string, first *int, pattern *string) (*FileReadConnection, error) {
+	if obj == nil || obj.ID == "" {
+		return emptyFileRead(), nil
+	}
+	// Agent: schema 接受 [String]，与 wandb 的 $fileNames 一致。传入的名字原样进 SQL。
+	page := store.VisibleFilePage{Names: names}
+	if after != nil {
+		page.AfterID = *after
+	}
+	if first != nil {
+		page.Limit = *first
+	}
+	if pattern != nil {
+		page.Pattern = *pattern
+	}
+	// Agent: 过滤和 LIMIT 都在 SQL 里完成。names 非空时走 (run_id, name) 索引。
+	files, more, err := r.Store.ListVisibleRunFilePage(obj.ID, page)
+	if err != nil {
+		return nil, err
+	}
+	conn := r.readFiles(ctx, files)
+	conn.PageInfo.HasNextPage = more
+	return conn, nil
+}
+
+// Artifact returns ArtifactResolver implementation.
+func (r *Resolver) Artifact() ArtifactResolver { return &artifactResolver{r} }
+
+// FileRead returns FileReadResolver implementation.
+func (r *Resolver) FileRead() FileReadResolver { return &fileReadResolver{r} }
+
 // Mutation returns MutationResolver implementation.
 func (r *Resolver) Mutation() MutationResolver { return &mutationResolver{r} }
 
@@ -572,7 +717,39 @@ func (r *Resolver) Query() QueryResolver { return &queryResolver{r} }
 // Run returns RunResolver implementation.
 func (r *Resolver) Run() RunResolver { return &runResolver{r} }
 
+type artifactResolver struct{ *Resolver }
+type fileReadResolver struct{ *Resolver }
 type mutationResolver struct{ *Resolver }
 type projectResolver struct{ *Resolver }
 type queryResolver struct{ *Resolver }
 type runResolver struct{ *Resolver }
+
+func emptyFileRead() *FileReadConnection {
+	return &FileReadConnection{Edges: []*FileReadEdge{}, PageInfo: &PageInfo{HasNextPage: false}}
+}
+
+// readFiles 把库里的文件行转成查询结果。签名失败时 directUrl 仍用 upload 路径。
+// readFiles maps stored files into the query result. A signing failure keeps directUrl on the upload path.
+func (r *Resolver) readFiles(ctx context.Context, files []store.VisibleFile) *FileReadConnection {
+	edges := make([]*FileReadEdge, 0, len(files))
+	for _, f := range files {
+		// Agent: 查询返回的 url 始终是 /files/upload/{id}，不改成云端地址。
+		url := "/files/upload/" + f.ID
+		direct := url
+		if f.ObjectKey != "" && r.Sign != nil {
+			// Agent: 只对非空 object_key 现签，有效期由签名实现固定为 24 小时，不入库。
+			if signed, err := r.Sign(ctx, f.ObjectKey); err == nil && signed != "" {
+				direct = signed
+			}
+		}
+		urlCopy := url
+		directCopy := direct
+		edges = append(edges, &FileReadEdge{Node: &FileRead{
+			ID:        f.ID,
+			Name:      f.Name,
+			URL:       &urlCopy,
+			DirectURL: &directCopy,
+		}, Cursor: f.ID})
+	}
+	return &FileReadConnection{Edges: edges, PageInfo: &PageInfo{HasNextPage: false}}
+}
