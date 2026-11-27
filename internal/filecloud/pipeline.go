@@ -78,11 +78,13 @@ func (p *Pipeline) EnqueueDelete(ids []string) {
 	if p == nil {
 		return
 	}
-	for _, id := range ids {
+	for i, id := range ids {
 		// Agent: 无前缀的旧行也入队。删除时只查 files，不因为缺少前缀而留在库里。
 		select {
 		case p.deleteCh <- id:
 		default:
+			// Agent: 队列满时后面的 id 不会入队。写日志留痕；清理循环对仍有残留的 run 会按退避间隔重新送入，不会永久丢失。
+			log.Printf("delete queue full, %d of %d ids not queued; cleanup will re-queue them", len(ids)-i, len(ids))
 			return
 		}
 	}

@@ -67,6 +67,10 @@ type DB struct {
 	fileDeleteMu      sync.Mutex
 	fileDeleteFn      func([]string)
 	fileDeletePending []string
+	// Agent: 清理循环里文件行迟迟删不掉的 run 先暂缓，让位给其它 run。只在内存里，重启后重新计算。
+	cleanupMu     sync.Mutex
+	cleanupParked map[string]parkedRun
+	cleanupNow    func() time.Time
 }
 
 type SQLPerfTopQuery struct {

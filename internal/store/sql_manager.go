@@ -133,6 +133,7 @@ const (
 	SQLDeleteConsBatch      SQLID = 310
 	SQLDeleteFilesBatch     SQLID = 311
 	SQLDeleteArtsBatch      SQLID = 312
+	SQLSelectDeletedRuns    SQLID = 313
 
 	// Agent: 400 段是文件上云的读写语句，两张表分开编号。
 	SQLInsertPendingFile         SQLID = 400
@@ -487,7 +488,9 @@ func loadSQLiteSQLs() {
 		SQLActiveRunsIn:           `SELECT id FROM runs WHERE id IN ({in}) AND deleted_at IS NULL`,
 		SQLStorageUsage:           storageUsageSQLSQLite,
 
-		SQLSelectDeletedRun:     `SELECT id FROM runs WHERE deleted_at IS NOT NULL LIMIT 1`,
+		SQLSelectDeletedRun: `SELECT id FROM runs WHERE deleted_at IS NOT NULL LIMIT 1`,
+		// Agent: 按 id 排序取前 N 个软删 run。N 为暂缓中的 run 数加 1，保证至少有一个不在暂缓里的候选。
+		SQLSelectDeletedRuns:    `SELECT id FROM runs WHERE deleted_at IS NOT NULL ORDER BY id LIMIT ?`,
 		SQLSelectDeletedProject: `SELECT id FROM projects WHERE deleted_at IS NOT NULL LIMIT 1`,
 		SQLDeleteRunHard:        `DELETE FROM runs WHERE id = ?`,
 		SQLDeleteProjectHard:    `DELETE FROM projects WHERE id = ?`,
@@ -658,7 +661,9 @@ func loadMySQLSQLs() {
 		SQLActiveRunsIn:           `SELECT id FROM runs WHERE id IN ({in}) AND deleted_at IS NULL`,
 		SQLStorageUsage:           storageUsageSQLMySQL,
 
-		SQLSelectDeletedRun:     `SELECT id FROM runs WHERE deleted_at IS NOT NULL LIMIT 1`,
+		SQLSelectDeletedRun: `SELECT id FROM runs WHERE deleted_at IS NOT NULL LIMIT 1`,
+		// Agent: 按 id 排序取前 N 个软删 run。N 为暂缓中的 run 数加 1，保证至少有一个不在暂缓里的候选。
+		SQLSelectDeletedRuns:    `SELECT id FROM runs WHERE deleted_at IS NOT NULL ORDER BY id LIMIT ?`,
 		SQLSelectDeletedProject: `SELECT id FROM projects WHERE deleted_at IS NOT NULL LIMIT 1`,
 		SQLDeleteRunHard:        `DELETE FROM runs WHERE id = ?`,
 		SQLDeleteProjectHard:    `DELETE FROM projects WHERE id = ?`,

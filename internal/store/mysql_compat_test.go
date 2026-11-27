@@ -106,6 +106,7 @@ func TestMySQLAllSQLStatements(t *testing.T) {
 		SQLActiveRunsEmpty, SQLRunSelectByID, SQLRunSelectByProject, SQLRunSelectFiltered,
 		SQLDeleteScalarsBatch, SQLDeleteHistsBatch, SQLDeleteStepsBatch, SQLDeleteKeysBatch,
 		SQLDeleteSysEvBatch, SQLDeleteConsBatch, SQLDeleteFilesBatch, SQLDeleteArtsBatch,
+		SQLSelectDeletedRuns,
 		SQLStorageUsage, SQLListRunsLite, SQLUpdateForkedRun, SQLInsertForkedRun,
 	}
 	for _, id := range ids {
