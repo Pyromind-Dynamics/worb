@@ -161,9 +161,13 @@ func loadUserGRPCConfig(getenv func(string) string) (*userGRPCConfig, error) {
 	if addr == "" {
 		return nil, fmt.Errorf("USER_GRPC_ADDR is required")
 	}
+	enabled, err := parseCertEnabled(getenv(envCertEnabled))
+	if err != nil {
+		return nil, err
+	}
 	var creds credentials.TransportCredentials
-	// Agent: 只有精确的 true 或 on 才读 CA，其它值都不读。
-	if getenv(envCertEnabled) == "true" || getenv(envCertEnabled) == "on" {
+	// Agent: 空值才关 TLS。true/on 读 CA；无法识别的非空值已在 parseCertEnabled 拒绝，不会落到明文。
+	if enabled {
 		path := strings.TrimSpace(getenv(envCertPath))
 		if path == "" {
 			return nil, fmt.Errorf("USER_GRPC_CERT_PATH is required")
@@ -181,6 +185,20 @@ func loadUserGRPCConfig(getenv func(string) string) (*userGRPCConfig, error) {
 		creds: creds,
 		ttl:   parseCacheTTL(getenv(envCacheTTL)),
 	}, nil
+}
+
+// parseCertEnabled 判定是否加载 CA。空值关闭 TLS；true/on 开启；其它非空值启动失败。
+// parseCertEnabled decides whether to load the CA. Empty disables TLS; true/on enables it; any other non-empty value is a startup error.
+func parseCertEnabled(raw string) (bool, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return false, nil
+	}
+	// Agent: 只认精确小写 true/on，不认 TRUE、1、yes。笔误必须启动失败，不能静默明文发 wandb key。
+	if raw == "true" || raw == "on" {
+		return true, nil
+	}
+	return false, fmt.Errorf("USER_GRPC_CERT_ENABLED must be true, on, or empty, got %q", raw)
 }
 
 // parseCacheTTL 把整数秒转成缓存时间。空值或非整数用 30 分钟。
@@ -231,28 +249,32 @@ func (c *userClient) Lookup(ctx context.Context, token string) (string, int) {
 	return userID, 0
 }
 
-// userIDFromResponse 按已确认的成功条件取出 user_id。失败只记日志，不把 key 写入日志。
-// userIDFromResponse extracts the user_id using the confirmed success rules. Failures are logged without the key.
+// userIDFromResponse 按已确认的成功条件取出 entity，即 user_cluster_info.uid 的十进制字符串。失败只记日志，不把 key 写入日志。
+// userIDFromResponse extracts the entity, the decimal user_cluster_info.uid, using the confirmed success rules. Failures are logged without the key.
 func userIDFromResponse(resp *userpb.UserInfoResponse, token string) (string, int) {
 	base := resp.GetBase()
-	// Agent: 缺 base 或 success 不是 true 时忽略 id，回 500，并记下回包里能看的字段。
-	if base == nil || !base.GetSuccess() {
-		logerr.Errorf("query_user_by_token rejected %s", redactToken(rejectedDetail(resp), token))
+	// Agent: 缺 base 是回包异常，回 500。有 base 且 success=false 是无效 token 的正常回包，回 401。
+	if base == nil {
+		logerr.Errorf("query_user_by_token rejected %s", redactToken(rejectedDetail(resp, 500), token))
 		return "", 500
 	}
+	if !base.GetSuccess() {
+		logerr.Errorf("query_user_by_token rejected %s", redactToken(rejectedDetail(resp, 401), token))
+		return "", 401
+	}
 	info := resp.GetUserClusterInfo()
-	// Agent: success 为 true 后，空对象、token_type、status、id 任一不通过都回 401。回包 token_type 必须是 worb_sk。
-	if info == nil || resp.GetTokenType() != tokenTypeRequest || info.GetStatus() != statusNormal || info.GetId() <= 0 {
+	// Agent: success 为 true 后，空对象、token_type、status、uid 任一不通过都回 401。回包 token_type 必须是 worb_sk。entity 取 uid，不再取 id。
+	if info == nil || resp.GetTokenType() != tokenTypeRequest || info.GetStatus() != statusNormal || info.GetUid() <= 0 {
 		// Agent: 响应体仍只有 invalid key。日志写明是哪一项不通过，不写 wandb key。
 		logerr.Errorf("query_user_by_token invalid key: %s", redactToken(invalidKeyReason(resp), token))
 		return "", 401
 	}
-	return strconv.FormatInt(info.GetId(), 10), 0
+	return strconv.FormatInt(info.GetUid(), 10), 0
 }
 
-// rejectedDetail 写出 success 不是 true 时的请求类型和回包字段。不包含 wandb key。
-// rejectedDetail records the request token type and response fields when success is not true. It does not include the wandb key.
-func rejectedDetail(resp *userpb.UserInfoResponse) string {
+// rejectedDetail 写出 success 不是 true 或缺少 base 时的请求类型和回包字段。不包含 wandb key。
+// rejectedDetail records the request token type and response fields when success is not true or base is missing. It does not include the wandb key.
+func rejectedDetail(resp *userpb.UserInfoResponse, httpStatus int) string {
 	base := resp.GetBase()
 	reason := "base.success=false"
 	success := false
@@ -269,14 +291,15 @@ func rejectedDetail(resp *userpb.UserInfoResponse) string {
 	info := resp.GetUserClusterInfo()
 	infoState := "missing"
 	userStatus := ""
-	var id int64
+	var uid int64
 	if info != nil {
 		infoState = "present"
 		userStatus = info.GetStatus()
-		id = info.GetId()
+		uid = info.GetUid()
 	}
-	return fmt.Sprintf("reason=%s request_token_type=%s response_token_type=%q success=%t error_code=%d message=%q user_cluster_info=%s status=%q id=%d http=500",
-		reason, tokenTypeRequest, resp.GetTokenType(), success, code, message, infoState, userStatus, id)
+	// Agent: http 状态由调用方传入，success=false 为 401，缺 base 为 500。日志写 uid，不再写 id。
+	return fmt.Sprintf("reason=%s request_token_type=%s response_token_type=%q success=%t error_code=%d message=%q user_cluster_info=%s status=%q uid=%d http=%d",
+		reason, tokenTypeRequest, resp.GetTokenType(), success, code, message, infoState, userStatus, uid, httpStatus)
 }
 
 // invalidKeyReason 列出 success 为 true 时仍不能换出 user_id 的字段。
@@ -284,7 +307,7 @@ func rejectedDetail(resp *userpb.UserInfoResponse) string {
 func invalidKeyReason(resp *userpb.UserInfoResponse) string {
 	var parts []string
 	info := resp.GetUserClusterInfo()
-	// Agent: 对象缺失时不再读取 status 和 id。
+	// Agent: 对象缺失时不再读取 status 和 uid。
 	if info == nil {
 		parts = append(parts, "missing user_cluster_info")
 	}
@@ -294,8 +317,8 @@ func invalidKeyReason(resp *userpb.UserInfoResponse) string {
 	if info != nil && info.GetStatus() != statusNormal {
 		parts = append(parts, fmt.Sprintf("status=%q", info.GetStatus()))
 	}
-	if info != nil && info.GetId() <= 0 {
-		parts = append(parts, fmt.Sprintf("id=%d", info.GetId()))
+	if info != nil && info.GetUid() <= 0 {
+		parts = append(parts, fmt.Sprintf("uid=%d", info.GetUid()))
 	}
 	return strings.Join(parts, " ")
 }

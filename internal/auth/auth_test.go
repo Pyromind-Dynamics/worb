@@ -62,12 +62,12 @@ func (f *fakeQuery) QueryUserByToken(ctx context.Context, in *userpb.QueryUserBy
 	return f.resp, f.err
 }
 
-// okResponse 构造 success 为 true、error_code 仍为 500 的成功回包。
-// okResponse builds a success response whose error_code remains 500.
-func okResponse(id int64) *userpb.UserInfoResponse {
+// okResponse 构造 success 为 true、error_code 仍为 500 的成功回包。参数写入 uid；id 固定为另一个值，用来确认 entity 不取 id。
+// okResponse builds a success response whose error_code remains 500. The argument is stored as uid; id is a different fixed value to prove entity does not use it.
+func okResponse(uid int64) *userpb.UserInfoResponse {
 	return &userpb.UserInfoResponse{
 		Base:            &userpb.GrpcResponse{Success: true, ErrorCode: 500, Message: "ignored"},
-		UserClusterInfo: &userpb.UserClusterInfo{Id: id, Uid: 1000000359, Status: "normal"},
+		UserClusterInfo: &userpb.UserClusterInfo{Id: 77777777, Uid: uid, Status: "normal"},
 		TokenType:       "worb_sk",
 	}
 }
@@ -76,7 +76,7 @@ func okResponse(id int64) *userpb.UserInfoResponse {
 // TestMiddlewareUsesUserID checks that a key becomes the user_id and a missing Authorization stays local.
 func TestMiddlewareUsesUserID(t *testing.T) {
 	key := "JDJiJDEyJHpHaGNGUlEzUWJsS2ZmOEtzbmo4Q2U="
-	fake := &fakeLookup{userID: "10000003"}
+	fake := &fakeLookup{userID: "1000000359"}
 	useLookup(t, fake)
 	var got string
 	handler := Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -85,7 +85,7 @@ func TestMiddlewareUsesUserID(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set("Authorization", "Bearer "+key)
 	handler.ServeHTTP(httptest.NewRecorder(), req)
-	if got != "10000003" || fake.calls != 1 || fake.token != key {
+	if got != "1000000359" || fake.calls != 1 || fake.token != key {
 		t.Fatal("lookup did not produce the user id")
 	}
 
@@ -101,7 +101,7 @@ func TestMiddlewareUsesUserID(t *testing.T) {
 // TestMiddlewareEmptyKeyStaysLocal 确认空 key 不调用查找，Basic 密码会作为 token。
 // TestMiddlewareEmptyKeyStaysLocal checks that an empty key skips lookup and a Basic password is the token.
 func TestMiddlewareEmptyKeyStaysLocal(t *testing.T) {
-	fake := &fakeLookup{userID: "10000003"}
+	fake := &fakeLookup{userID: "1000000359"}
 	useLookup(t, fake)
 	var got string
 	handler := Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -118,7 +118,7 @@ func TestMiddlewareEmptyKeyStaysLocal(t *testing.T) {
 	req = httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set("Authorization", "Basic "+encoded)
 	handler.ServeHTTP(httptest.NewRecorder(), req)
-	if got != "10000003" || fake.calls != 1 {
+	if got != "1000000359" || fake.calls != 1 {
 		t.Fatalf("basic entity = %q calls = %d", got, fake.calls)
 	}
 }
@@ -215,10 +215,6 @@ func TestLoadUserGRPCConfig(t *testing.T) {
 		switch k {
 		case envAddr:
 			return " user.internal:443 "
-		case envCertEnabled:
-			return "TRUE"
-		case envCertPath:
-			return "/no/such/ca.pem"
 		case envCacheTTL:
 			return "nope"
 		default:
@@ -233,6 +229,22 @@ func TestLoadUserGRPCConfig(t *testing.T) {
 	}
 	if cfg.creds.Info().SecurityProtocol != "insecure" {
 		t.Fatalf("protocol %q", cfg.creds.Info().SecurityProtocol)
+	}
+
+	for _, raw := range []string{"TRUE", "1", "yes", "false", "off"} {
+		_, err := loadUserGRPCConfig(func(k string) string {
+			if k == envAddr {
+				return "h:1"
+			}
+			if k == envCertEnabled {
+				return raw
+			}
+			return ""
+		})
+		// Agent: 非空且不是 true/on 必须启动失败，不能落到 insecure。
+		if err == nil || !strings.Contains(err.Error(), "USER_GRPC_CERT_ENABLED") || !strings.Contains(err.Error(), raw) {
+			t.Fatalf("unrecognized %q err %v", raw, err)
+		}
 	}
 
 	if _, err := loadUserGRPCConfig(func(k string) string {
@@ -262,6 +274,27 @@ func TestLoadUserGRPCConfig(t *testing.T) {
 	}
 }
 
+// TestParseCertEnabled 确认空值关 TLS，true/on 开 TLS，其它非空值报错。
+// TestParseCertEnabled checks that empty disables TLS, true/on enables it, and other values fail.
+func TestParseCertEnabled(t *testing.T) {
+	for _, raw := range []string{"", "  "} {
+		on, err := parseCertEnabled(raw)
+		if err != nil || on {
+			t.Fatalf("empty %q on=%v err=%v", raw, on, err)
+		}
+	}
+	for _, raw := range []string{"true", "on", " true "} {
+		on, err := parseCertEnabled(raw)
+		if err != nil || !on {
+			t.Fatalf("enable %q on=%v err=%v", raw, on, err)
+		}
+	}
+	on, err := parseCertEnabled("TRUE")
+	if err == nil || on || !strings.Contains(err.Error(), "TRUE") {
+		t.Fatalf("TRUE on=%v err=%v", on, err)
+	}
+}
+
 // TestParseCacheTTL 确认非法缓存时间用 30 分钟，整数秒按原值使用。
 // TestParseCacheTTL checks that a non-integer cache TTL uses 30 minutes and an integer is used as seconds.
 func TestParseCacheTTL(t *testing.T) {
@@ -279,8 +312,8 @@ func TestParseCacheTTL(t *testing.T) {
 // TestUserIDFromResponse 确认 success、空对象、token_type、status 和 id 的判定。
 // TestUserIDFromResponse checks the success, empty object, token_type, status, and id decisions.
 func TestUserIDFromResponse(t *testing.T) {
-	id, status := userIDFromResponse(okResponse(10000003), "secret")
-	if id != "10000003" || status != 0 {
+	id, status := userIDFromResponse(okResponse(1000000359), "secret")
+	if id != "1000000359" || status != 0 {
 		t.Fatalf("id %q status %d", id, status)
 	}
 	id, status = userIDFromResponse(okResponse(8), "secret")
@@ -291,57 +324,85 @@ func TestUserIDFromResponse(t *testing.T) {
 	var buf bytes.Buffer
 	log.SetOutput(&buf)
 	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	// Agent: 缺 base 是回包异常，必须 500，日志 http=500。
 	_, status = userIDFromResponse(&userpb.UserInfoResponse{}, "secret")
-	if status != 500 || !strings.Contains(buf.String(), "reason=missing base") || strings.Contains(buf.String(), "secret") {
+	if status != 500 || !strings.Contains(buf.String(), "reason=missing base") || !strings.Contains(buf.String(), "http=500") || strings.Contains(buf.String(), "secret") {
 		t.Fatalf("missing base status %d log %q", status, buf.String())
 	}
 	buf.Reset()
+	// Agent: success=false 是无效 token 的正常回包，必须 401 而不是 500。
 	_, status = userIDFromResponse(&userpb.UserInfoResponse{
 		Base:      &userpb.GrpcResponse{Success: false, ErrorCode: 500, Message: "worb_sk"},
 		TokenType: "other",
 	}, "secret")
-	if status != 500 || !strings.Contains(buf.String(), "reason=base.success=false") || !strings.Contains(buf.String(), "request_token_type=worb_sk") || !strings.Contains(buf.String(), `message="worb_sk"`) || !strings.Contains(buf.String(), `response_token_type="other"`) || !strings.Contains(buf.String(), "user_cluster_info=missing") || !strings.Contains(buf.String(), "http=500") || strings.Contains(buf.String(), "secret") {
+	if status != 401 || !strings.Contains(buf.String(), "reason=base.success=false") || !strings.Contains(buf.String(), "request_token_type=worb_sk") || !strings.Contains(buf.String(), `message="worb_sk"`) || !strings.Contains(buf.String(), `response_token_type="other"`) || !strings.Contains(buf.String(), "user_cluster_info=missing") || !strings.Contains(buf.String(), "http=401") || strings.Contains(buf.String(), "http=500") || strings.Contains(buf.String(), "secret") {
 		t.Fatalf("success false status %d log %q", status, buf.String())
 	}
 	buf.Reset()
-	bad := okResponse(10000003)
+	// Agent: 启动探针同款 ErrorCode:7 也是鉴权失败，回 401。
+	_, status = userIDFromResponse(&userpb.UserInfoResponse{
+		Base: &userpb.GrpcResponse{Success: false, ErrorCode: 7, Message: "invalid token"},
+	}, "secret")
+	if status != 401 || !strings.Contains(buf.String(), "error_code=7") || !strings.Contains(buf.String(), "http=401") {
+		t.Fatalf("error_code 7 status %d log %q", status, buf.String())
+	}
+	buf.Reset()
+	bad := okResponse(1000000359)
 	bad.UserClusterInfo = nil
 	_, status = userIDFromResponse(bad, "secret")
 	if status != 401 || !strings.Contains(buf.String(), "missing user_cluster_info") || strings.Contains(buf.String(), "secret") {
 		t.Fatalf("empty info status %d log %q", status, buf.String())
 	}
 	buf.Reset()
-	bad = okResponse(10000003)
+	bad = okResponse(1000000359)
 	bad.TokenType = "other"
 	_, status = userIDFromResponse(bad, "secret")
 	if status != 401 || !strings.Contains(buf.String(), `token_type="other"`) {
 		t.Fatalf("token type status %d log %q", status, buf.String())
 	}
 	buf.Reset()
-	bad = okResponse(10000003)
+	bad = okResponse(1000000359)
 	bad.TokenType = "worb"
 	_, status = userIDFromResponse(bad, "secret")
 	if status != 401 || !strings.Contains(buf.String(), `token_type="worb"`) {
 		t.Fatalf("legacy token type status %d log %q", status, buf.String())
 	}
 	buf.Reset()
-	bad = okResponse(10000003)
+	bad = okResponse(1000000359)
 	bad.UserClusterInfo.Status = "disabled"
 	_, status = userIDFromResponse(bad, "secret")
 	if status != 401 || !strings.Contains(buf.String(), `status="disabled"`) {
 		t.Fatalf("status field %d log %q", status, buf.String())
 	}
 	buf.Reset()
+	// Agent: uid 为 0 或负数回 401，即使 id 是正数。日志写 uid。
 	bad = okResponse(0)
 	_, status = userIDFromResponse(bad, "secret")
-	if status != 401 || !strings.Contains(buf.String(), "id=0") {
-		t.Fatalf("zero id status %d log %q", status, buf.String())
+	if status != 401 || !strings.Contains(buf.String(), "uid=0") {
+		t.Fatalf("zero uid status %d log %q", status, buf.String())
 	}
 	buf.Reset()
 	bad = okResponse(-1)
 	_, status = userIDFromResponse(bad, "secret")
-	if status != 401 || !strings.Contains(buf.String(), "id=-1") {
-		t.Fatalf("negative id status %d log %q", status, buf.String())
+	if status != 401 || !strings.Contains(buf.String(), "uid=-1") {
+		t.Fatalf("negative uid status %d log %q", status, buf.String())
+	}
+}
+
+// TestUserIDFromResponseUsesUID 确认 entity 取 uid，id 不同也不影响结果。
+// TestUserIDFromResponseUsesUID checks that the entity is the uid and a different id does not matter.
+func TestUserIDFromResponseUsesUID(t *testing.T) {
+	resp := okResponse(1000000359)
+	// Agent: id 与 uid 故意不同，返回值必须是 uid。
+	resp.UserClusterInfo.Id = 10000003
+	got, status := userIDFromResponse(resp, "secret")
+	if got != "1000000359" || status != 0 {
+		t.Fatalf("entity %q status %d", got, status)
+	}
+	resp.UserClusterInfo.Id = 0
+	got, status = userIDFromResponse(resp, "secret")
+	if got != "1000000359" || status != 0 {
+		t.Fatalf("zero id entity %q status %d", got, status)
 	}
 }
 
@@ -399,7 +460,7 @@ func TestGRPCStartupCheckLogs(t *testing.T) {
 // TestLookupCache 确认命中缓存直接返回，失败和过期都会重新调用。
 // TestLookupCache checks that a hit returns directly, while a failure or expiry calls again.
 func TestLookupCache(t *testing.T) {
-	q := &fakeQuery{resp: okResponse(10000003)}
+	q := &fakeQuery{resp: okResponse(1000000359)}
 	now := time.Unix(1_700_000_000, 0)
 	client := &userClient{
 		rpc:   q,
@@ -407,11 +468,11 @@ func TestLookupCache(t *testing.T) {
 		now:   func() time.Time { return now },
 	}
 	id, status := client.Lookup(context.Background(), "secret")
-	if id != "10000003" || status != 0 || q.calls != 1 || q.kind != "worb_sk" || q.token != "secret" {
+	if id != "1000000359" || status != 0 || q.calls != 1 || q.kind != "worb_sk" || q.token != "secret" {
 		t.Fatalf("id %q status %d calls %d kind %q", id, status, q.calls, q.kind)
 	}
 	id, status = client.Lookup(context.Background(), "secret")
-	if id != "10000003" || status != 0 || q.calls != 1 {
+	if id != "1000000359" || status != 0 || q.calls != 1 {
 		t.Fatalf("cache miss id %q calls %d", id, q.calls)
 	}
 	now = now.Add(time.Second)
@@ -433,7 +494,19 @@ func TestLookupCache(t *testing.T) {
 	}
 
 	q.err = nil
-	q.resp = okResponse(10000003)
+	// Agent: 用户服务对无效 token 的正常回包是 success=false，Lookup 必须回 401 且不得写入缓存。
+	q.resp = &userpb.UserInfoResponse{Base: &userpb.GrpcResponse{Success: false, ErrorCode: 7}}
+	_, status = client.Lookup(context.Background(), "bad-key")
+	if status != 401 {
+		t.Fatalf("success false status %d", status)
+	}
+	calls = q.calls
+	_, _ = client.Lookup(context.Background(), "bad-key")
+	if q.calls != calls+1 {
+		t.Fatal("401 success=false was cached")
+	}
+
+	q.resp = okResponse(1000000359)
 	q.resp.TokenType = ""
 	_, status = client.Lookup(context.Background(), "third")
 	if status != 401 {
